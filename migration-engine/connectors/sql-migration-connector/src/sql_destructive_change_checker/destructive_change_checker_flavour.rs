@@ -4,7 +4,7 @@ mod postgres;
 mod sqlite;
 
 use super::DestructiveCheckPlan;
-use crate::{connection_wrapper::Connection, pair::Pair, sql_migration::AlterColumn, sql_schema_differ::ColumnChanges};
+use crate::{pair::Pair, sql_migration::AlterColumn, sql_schema_differ::ColumnChanges};
 use migration_connector::{ConnectorError, ConnectorResult};
 use sql_schema_describer::walkers::ColumnWalker;
 
@@ -29,15 +29,15 @@ pub(crate) trait DestructiveChangeCheckerFlavour {
         step_index: usize,
     );
 
-    async fn count_rows_in_table(&self, table_name: &str, conn: &Connection) -> ConnectorResult<i64>;
+    async fn count_rows_in_table(&mut self, table_name: &str) -> ConnectorResult<i64>;
 
-    async fn count_values_in_column(&self, table_and_column: (&str, &str), conn: &Connection) -> ConnectorResult<i64>;
+    async fn count_values_in_column(&mut self, table_and_column: (&str, &str)) -> ConnectorResult<i64>;
 }
 
 /// Display a column type for warnings/errors.
 fn display_column_type(
     column: sql_schema_describer::walkers::ColumnWalker<'_>,
-    connector: &dyn datamodel_connector::Connector,
+    connector: &dyn datamodel::datamodel_connector::Connector,
 ) -> String {
     match &column.column_type().native_type {
         Some(tpe) => connector.introspect_native_type(tpe.clone()).unwrap().to_string(),

@@ -3,8 +3,8 @@ use datamodel_connector::{
     helper::{arg_vec_from_opt, args_vec_from_opt, parse_one_opt_u32, parse_two_opt_u32},
     parser_database::walkers::ModelWalker,
     walker_ext_traits::*,
-    Connector, ConnectorCapability, ConstraintScope, Diagnostics, NativeTypeConstructor, NativeTypeInstance,
-    ReferentialAction, ReferentialIntegrity, ScalarType,
+    Connector, ConnectorCapability, ConstraintScope, DatamodelError, Diagnostics, NativeTypeConstructor,
+    NativeTypeInstance, ReferentialAction, ReferentialIntegrity, ScalarType,
 };
 use enumflags2::BitFlags;
 use native_types::{
@@ -93,13 +93,14 @@ const CAPABILITIES: &[ConnectorCapability] = &[
     ConnectorCapability::JsonFilteringAlphanumeric,
     ConnectorCapability::NamedForeignKeys,
     ConnectorCapability::NamedPrimaryKeys,
-    ConnectorCapability::QueryRaw,
+    ConnectorCapability::SqlQueryRaw,
     ConnectorCapability::RelationFieldsInArbitraryOrder,
     ConnectorCapability::ScalarLists,
     ConnectorCapability::JsonLists,
     ConnectorCapability::UpdateableId,
     ConnectorCapability::WritableAutoincField,
     ConnectorCapability::UsingHashIndex,
+    ConnectorCapability::ImplicitManyToManyRelation,
 ];
 
 pub struct PostgresDatamodelConnector;
@@ -226,12 +227,9 @@ impl Connector for PostgresDatamodelConnector {
         }
     }
 
-    fn validate_model(&self, model: ModelWalker<'_, '_>, errors: &mut Diagnostics) {
+    fn validate_model(&self, model: ModelWalker<'_>, errors: &mut Diagnostics) {
         let mut push_error = |err: ConnectorError| {
-            errors.push_error(datamodel_connector::DatamodelError::ConnectorError {
-                message: err.to_string(),
-                span: model.ast_model().span,
-            });
+            errors.push_error(DatamodelError::new_connector_error(err, model.ast_model().span));
         };
 
         for index in model.indexes() {

@@ -5,9 +5,9 @@ use crate::{
     sql_migration::{AlterColumn, AlterEnum, AlterTable, RedefineTable, TableChange},
     sql_schema_differ::ColumnChanges,
 };
+use datamodel::PrismaValue;
 use native_types::MySqlType;
 use once_cell::sync::Lazy;
-use prisma_value::PrismaValue;
 use regex::Regex;
 use sql_ddl::{mysql as ddl, IndexColumn, SortOrder};
 use sql_schema_describer::{
@@ -133,7 +133,10 @@ impl SqlRenderer for MysqlFlavour {
                         })
                         .join(", ")
                 )),
-                TableChange::AddColumn { column_id } => {
+                TableChange::AddColumn {
+                    column_id,
+                    has_virtual_default: _,
+                } => {
                     let column = tables.next().column_at(*column_id);
                     let col_sql = self.render_column(&column);
 
@@ -190,7 +193,11 @@ impl SqlRenderer for MysqlFlavour {
 
     fn render_create_index(&self, index: &IndexWalker<'_>) -> String {
         ddl::CreateIndex {
-            unique: index.index_type().is_unique(),
+            r#type: match index.index_type() {
+                sql_schema_describer::IndexType::Unique => ddl::IndexType::Unique,
+                sql_schema_describer::IndexType::Normal => ddl::IndexType::Normal,
+                sql_schema_describer::IndexType::Fulltext => ddl::IndexType::Fulltext,
+            },
             index_name: index.name().into(),
             on: (
                 index.table().name().into(),

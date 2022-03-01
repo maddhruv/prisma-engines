@@ -1,6 +1,7 @@
 use super::{
     constraint_namespace::ConstraintName,
     database_name::validate_db_name,
+    default_value,
     names::{NameTaken, Names},
 };
 use crate::{
@@ -19,9 +20,8 @@ use datamodel_connector::{
     walker_ext_traits::*,
     ConnectorCapability,
 };
-use std::str::FromStr;
 
-pub(super) fn validate_client_name(field: FieldWalker<'_, '_>, names: &Names<'_>, ctx: &mut Context<'_>) {
+pub(super) fn validate_client_name(field: FieldWalker<'_>, names: &Names<'_>, ctx: &mut Context<'_>) {
     let model = field.model();
 
     for taken in names.name_taken(model.model_id(), field.name()).into_iter() {
@@ -60,7 +60,7 @@ pub(super) fn validate_client_name(field: FieldWalker<'_, '_>, names: &Names<'_>
 /// Some databases use constraints for default values, with a name that can be unique in a certain
 /// namespace. Validates the field default constraint against name clases.
 pub(super) fn has_a_unique_default_constraint_name(
-    field: ScalarFieldWalker<'_, '_>,
+    field: ScalarFieldWalker<'_>,
     names: &Names<'_>,
     ctx: &mut Context<'_>,
 ) {
@@ -92,7 +92,7 @@ pub(super) fn has_a_unique_default_constraint_name(
 
 /// The length prefix can be used with strings and byte columns.
 pub(crate) fn validate_length_used_with_correct_types(
-    attr: ScalarFieldAttributeWalker<'_, '_>,
+    attr: ScalarFieldAttributeWalker<'_>,
     attribute: (&str, ast::Span),
     ctx: &mut Context<'_>,
 ) {
@@ -122,7 +122,7 @@ pub(crate) fn validate_length_used_with_correct_types(
     ));
 }
 
-pub(super) fn validate_native_type_arguments(field: ScalarFieldWalker<'_, '_>, ctx: &mut Context<'_>) {
+pub(super) fn validate_native_type_arguments(field: ScalarFieldWalker<'_>, ctx: &mut Context<'_>) {
     let connector_name = ctx
         .datasource
         .map(|ds| ds.active_provider.clone())
@@ -135,30 +135,23 @@ pub(super) fn validate_native_type_arguments(field: ScalarFieldWalker<'_, '_>, c
     // Validate that the attribute is scoped with the right datasource name.
     if let Some(datasource) = ctx.datasource {
         if datasource.name != attr_scope {
-            ctx.push_error(DatamodelError::new_connector_error(
-                &ConnectorError::from_kind(ErrorKind::InvalidPrefixForNativeTypes {
-                    given_prefix: attr_scope.to_owned(),
-                    expected_prefix: datasource.name.clone(),
-                    suggestion: [datasource.name.as_str(), type_name].join("."),
-                })
-                .to_string(),
-                span,
-            ));
+            let err = ConnectorError::from_kind(ErrorKind::InvalidPrefixForNativeTypes {
+                given_prefix: attr_scope.to_owned(),
+                expected_prefix: datasource.name.clone(),
+                suggestion: [datasource.name.as_str(), type_name].join("."),
+            });
+            ctx.push_error(DatamodelError::new_connector_error(err, span));
         }
     }
 
     let constructor = if let Some(cons) = ctx.connector.find_native_type_constructor(type_name) {
         cons
     } else {
-        ctx.push_error(DatamodelError::new_connector_error(
-            &ConnectorError::from_kind(ErrorKind::NativeTypeNameUnknown {
-                native_type: type_name.to_owned(),
-                connector_name,
-            })
-            .to_string(),
-            span,
-        ));
-        return;
+        let err = ConnectorError::from_kind(ErrorKind::NativeTypeNameUnknown {
+            native_type: type_name.to_owned(),
+            connector_name,
+        });
+        return ctx.push_error(DatamodelError::new_connector_error(err, span));
     };
 
     let number_of_args = args.len();
@@ -179,12 +172,11 @@ pub(super) fn validate_native_type_arguments(field: ScalarFieldWalker<'_, '_>, c
         && constructor._number_of_optional_args > 0
     {
         ctx.push_error(DatamodelError::new_connector_error(
-            &ConnectorError::from_kind(ErrorKind::OptionalArgumentCountMismatchError {
+            ConnectorError::from_kind(ErrorKind::OptionalArgumentCountMismatchError {
                 native_type: type_name.to_owned(),
                 optional_count: constructor._number_of_optional_args,
                 given_count: number_of_args,
-            })
-            .to_string(),
+            }),
             span,
         ));
         return;
@@ -193,7 +185,7 @@ pub(super) fn validate_native_type_arguments(field: ScalarFieldWalker<'_, '_>, c
     // check for compatibility with scalar type
     if !constructor.prisma_types.contains(&scalar_type) {
         ctx.push_error(DatamodelError::new_connector_error(
-            &ConnectorError::from_kind(ErrorKind::IncompatibleNativeType {
+            ConnectorError::from_kind(ErrorKind::IncompatibleNativeType {
                 native_type: type_name.to_owned(),
                 field_type: scalar_type.as_str(),
                 expected_types: constructor
@@ -202,8 +194,7 @@ pub(super) fn validate_native_type_arguments(field: ScalarFieldWalker<'_, '_>, c
                     .map(|s| s.as_str())
                     .collect::<Vec<_>>()
                     .join(" or "),
-            })
-            .to_string(),
+            }),
             span,
         ));
         return;
@@ -216,116 +207,42 @@ pub(super) fn validate_native_type_arguments(field: ScalarFieldWalker<'_, '_>, c
                 .validate_native_type_arguments(&native_type, &scalar_type, &mut errors);
 
             for error in errors {
-                ctx.push_error(DatamodelError::ConnectorError {
-                    message: error.to_string(),
-                    span: field.ast_field().span,
-                });
+                ctx.push_error(DatamodelError::new_connector_error(error, field.ast_field().span));
             }
         }
         Err(connector_error) => {
-            ctx.push_error(DatamodelError::new_connector_error(&connector_error.to_string(), span));
+            ctx.push_error(DatamodelError::new_connector_error(connector_error, span));
         }
     };
 }
 
-pub(super) fn validate_default(field: ScalarFieldWalker<'_, '_>, ctx: &mut Context<'_>) {
-    use chrono::{DateTime, FixedOffset};
+/// Validates the @default attribute of a model scalar field
+pub(super) fn validate_default_value(field: ScalarFieldWalker<'_>, ctx: &mut Context<'_>) {
+    let model_name = field.model().name();
+    let default_mapped_name = field.default_value().and_then(|d| d.mapped_name());
+    let default_attribute = field.default_attribute();
 
     // Named defaults.
-
-    let mapped_name = field.default_value().and_then(|default| default.mapped_name());
-
-    if mapped_name.is_some() && !ctx.connector.supports_named_default_values() {
+    if default_mapped_name.is_some() && !ctx.connector.supports_named_default_values() {
         ctx.push_error(DatamodelError::new_attribute_validation_error(
             "You defined a database name for the default value of a field on the model. This is not supported by the provider.",
             "default",
-            field.default_attribute().unwrap().span,
+            default_attribute.unwrap().span,
         ));
     }
 
-    if mapped_name.is_some() {
-        validate_db_name(
-            field.model().name(),
-            field.default_attribute().unwrap(),
-            mapped_name,
-            ctx,
-            false,
-        );
+    if default_mapped_name.is_some() {
+        validate_db_name(model_name, default_attribute.unwrap(), default_mapped_name, ctx, false);
     }
 
-    let scalar_type = if let Some(scalar_type) = field.scalar_type() {
-        scalar_type
-    } else {
-        return;
-    };
+    let default_value = field.default_value().map(|d| d.value());
+    let scalar_type = field.scalar_type();
 
-    // Scalar type specific validations.
-    match (scalar_type, field.default_value()) {
-        (ScalarType::Json, Some(attribute)) => {
-            if let Some((value, span)) = attribute.value().as_string_value() {
-                if let Err(details) = serde_json::from_str::<serde_json::Value>(value) {
-                    return ctx.push_error(DatamodelError::new_attribute_validation_error(
-                        &format!(
-                            "Parse error: \"{bad_value}\" is not a valid JSON string. ({details})",
-                            details = details,
-                            bad_value = value,
-                        ),
-                        "default",
-                        span,
-                    ));
-                }
-            }
-        }
-        (ScalarType::Bytes, Some(attribute)) => {
-            if let Some((value, span)) = attribute.value().as_string_value() {
-                if let Err(details) = dml::prisma_value::decode_bytes(value) {
-                    return ctx.push_error(DatamodelError::new_attribute_validation_error(
-                        &format!(
-                            "Parse error: \"{bad_value}\" is not a valid base64 string. ({details})",
-                            details = details,
-                            bad_value = value,
-                        ),
-                        "default",
-                        span,
-                    ));
-                }
-            }
-        }
-        (ScalarType::DateTime, Some(attribute)) => {
-            if let Some((value, span)) = attribute.value().as_string_value() {
-                if let Err(details) = DateTime::<FixedOffset>::parse_from_rfc3339(value) {
-                    return ctx.push_error(DatamodelError::new_attribute_validation_error(
-                        &format!(
-                            "Parse error: \"{bad_value}\" is not a valid rfc3339 datetime string. ({details})",
-                            details = details,
-                            bad_value = value,
-                        ),
-                        "default",
-                        span,
-                    ));
-                }
-            }
-        }
-        (ScalarType::BigInt | ScalarType::Int, Some(attribute)) => {
-            if let Some((value, span)) = attribute.value().as_numeric_value() {
-                if let Err(details) = i64::from_str(value) {
-                    return ctx.push_error(DatamodelError::new_attribute_validation_error(
-                        &format!(
-                            "Parse error: \"{bad_value}\" is not a valid integer. ({details})",
-                            details = details,
-                            bad_value = value,
-                        ),
-                        "default",
-                        span,
-                    ));
-                }
-            }
-        }
-        _ => (),
-    }
+    default_value::validate_default_value(default_value, scalar_type, ctx);
+    default_value::validate_auto_param(default_value, ctx);
 }
 
-pub(super) fn validate_scalar_field_connector_specific(field: ScalarFieldWalker<'_, '_>, ctx: &mut Context<'_>) {
+pub(super) fn validate_scalar_field_connector_specific(field: ScalarFieldWalker<'_>, ctx: &mut Context<'_>) {
     if matches!(
         field.scalar_field_type(),
         ScalarFieldType::BuiltInScalar(ScalarType::Json)
@@ -366,7 +283,7 @@ pub(super) fn validate_scalar_field_connector_specific(field: ScalarFieldWalker<
     }
 }
 
-pub(super) fn validate_unsupported_field_type(field: ScalarFieldWalker<'_, '_>, ctx: &mut Context<'_>) {
+pub(super) fn validate_unsupported_field_type(field: ScalarFieldWalker<'_>, ctx: &mut Context<'_>) {
     use once_cell::sync::Lazy;
     use regex::Regex;
 
@@ -383,7 +300,7 @@ pub(super) fn validate_unsupported_field_type(field: ScalarFieldWalker<'_, '_>, 
     });
 
     let connector = source.active_connector;
-    let (unsupported_lit, _) = if let ScalarFieldType::Unsupported = field.scalar_field_type() {
+    let (unsupported_lit, _) = if let ScalarFieldType::Unsupported(_) = field.scalar_field_type() {
         field.ast_field().field_type.as_unsupported().unwrap()
     } else {
         return;

@@ -86,6 +86,12 @@ impl ConnectorError {
             ErrorKind::MissingFullTextSearchIndex => Some(KnownError::new(
                 user_facing_errors::query_engine::MissingFullTextSearchIndex {},
             )),
+            ErrorKind::TransactionAborted { message } => Some(KnownError::new(
+                user_facing_errors::query_engine::InteractiveTransactionError { error: message.clone() },
+            )),
+            ErrorKind::MongoReplicaSetRequired => Some(KnownError::new(
+                user_facing_errors::query_engine::MongoReplicaSetRequired {},
+            )),
             _ => None,
         };
 
@@ -180,7 +186,10 @@ pub enum ErrorKind {
     AuthenticationFailed { user: String },
 
     #[error("Database error. error code: {}, error message: {}", code, message)]
-    RawError { code: String, message: String },
+    RawDatabaseError { code: String, message: String },
+
+    #[error("Raw API error: {0}")]
+    RawApiError(String),
 
     #[error("{}", details)]
     InvalidDatabaseUrl { details: String, url: String },
@@ -212,6 +221,9 @@ pub enum ErrorKind {
 
     #[error("Cannot find a fulltext index to use for the search")]
     MissingFullTextSearchIndex,
+
+    #[error("Replica Set required for Transactions")]
+    MongoReplicaSetRequired,
 }
 
 impl From<DomainError> for ConnectorError {

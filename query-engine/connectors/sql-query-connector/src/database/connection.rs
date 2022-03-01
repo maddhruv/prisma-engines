@@ -9,6 +9,7 @@ use connector_interface::{
 use prisma_models::{prelude::*, SelectionResult};
 use prisma_value::PrismaValue;
 use quaint::{connector::TransactionCapable, prelude::ConnectionInfo};
+use std::collections::HashMap;
 
 pub struct SqlConnection<C> {
     inner: C,
@@ -60,10 +61,19 @@ where
         filter: &Filter,
         selected_fields: &FieldSelection,
         aggr_selections: &[RelAggregationSelection],
+        trace_id: Option<String>,
     ) -> connector::Result<Option<SingleRecord>> {
         // [Composites] todo: FieldSelection -> ModelProjection conversion
         catch(self.connection_info.clone(), async move {
-            read::get_single_record(&self.inner, model, filter, &selected_fields.into(), aggr_selections).await
+            read::get_single_record(
+                &self.inner,
+                model,
+                filter,
+                &selected_fields.into(),
+                aggr_selections,
+                trace_id,
+            )
+            .await
         })
         .await
     }
@@ -74,6 +84,7 @@ where
         query_arguments: QueryArguments,
         selected_fields: &FieldSelection,
         aggr_selections: &[RelAggregationSelection],
+        trace_id: Option<String>,
     ) -> connector::Result<ManyRecords> {
         catch(self.connection_info.clone(), async move {
             read::get_many_records(
@@ -83,6 +94,7 @@ where
                 &selected_fields.into(),
                 aggr_selections,
                 SqlInfo::from(&self.connection_info),
+                trace_id,
             )
             .await
         })
@@ -93,9 +105,10 @@ where
         &mut self,
         from_field: &RelationFieldRef,
         from_record_ids: &[SelectionResult],
+        trace_id: Option<String>,
     ) -> connector::Result<Vec<(SelectionResult, SelectionResult)>> {
         catch(self.connection_info.clone(), async move {
-            read::get_related_m2m_record_ids(&self.inner, from_field, from_record_ids).await
+            read::get_related_m2m_record_ids(&self.inner, from_field, from_record_ids, trace_id).await
         })
         .await
     }
@@ -107,9 +120,19 @@ where
         selections: Vec<AggregationSelection>,
         group_by: Vec<ScalarFieldRef>,
         having: Option<Filter>,
+        trace_id: Option<String>,
     ) -> connector::Result<Vec<AggregationRow>> {
         catch(self.connection_info.clone(), async move {
-            read::aggregate(&self.inner, model, query_arguments, selections, group_by, having).await
+            read::aggregate(
+                &self.inner,
+                model,
+                query_arguments,
+                selections,
+                group_by,
+                having,
+                trace_id,
+            )
+            .await
         })
         .await
     }
@@ -120,9 +143,14 @@ impl<C> WriteOperations for SqlConnection<C>
 where
     C: QueryExt + Send + Sync + 'static,
 {
-    async fn create_record(&mut self, model: &ModelRef, args: WriteArgs) -> connector::Result<SelectionResult> {
+    async fn create_record(
+        &mut self,
+        model: &ModelRef,
+        args: WriteArgs,
+        trace_id: Option<String>,
+    ) -> connector::Result<SelectionResult> {
         catch(self.connection_info.clone(), async move {
-            write::create_record(&self.inner, model, args).await
+            write::create_record(&self.inner, &self.connection_info.sql_family(), model, args, trace_id).await
         })
         .await
     }
@@ -132,6 +160,7 @@ where
         model: &ModelRef,
         args: Vec<WriteArgs>,
         skip_duplicates: bool,
+        trace_id: Option<String>,
     ) -> connector::Result<usize> {
         catch(self.connection_info.clone(), async move {
             write::create_records(
@@ -140,6 +169,7 @@ where
                 model,
                 args,
                 skip_duplicates,
+                trace_id,
             )
             .await
         })
@@ -151,16 +181,22 @@ where
         model: &ModelRef,
         record_filter: RecordFilter,
         args: WriteArgs,
+        trace_id: Option<String>,
     ) -> connector::Result<Vec<SelectionResult>> {
         catch(self.connection_info.clone(), async move {
-            write::update_records(&self.inner, model, record_filter, args).await
+            write::update_records(&self.inner, model, record_filter, args, trace_id).await
         })
         .await
     }
 
-    async fn delete_records(&mut self, model: &ModelRef, record_filter: RecordFilter) -> connector::Result<usize> {
+    async fn delete_records(
+        &mut self,
+        model: &ModelRef,
+        record_filter: RecordFilter,
+        trace_id: Option<String>,
+    ) -> connector::Result<usize> {
         catch(self.connection_info.clone(), async move {
-            write::delete_records(&self.inner, model, record_filter).await
+            write::delete_records(&self.inner, model, record_filter, trace_id).await
         })
         .await
     }
@@ -182,23 +218,29 @@ where
         field: &RelationFieldRef,
         parent_id: &SelectionResult,
         child_ids: &[SelectionResult],
+        trace_id: Option<String>,
     ) -> connector::Result<()> {
         catch(self.connection_info.clone(), async move {
-            write::m2m_disconnect(&self.inner, field, parent_id, child_ids).await
+            write::m2m_disconnect(&self.inner, field, parent_id, child_ids, trace_id).await
         })
         .await
     }
 
-    async fn execute_raw(&mut self, query: String, parameters: Vec<PrismaValue>) -> connector::Result<usize> {
+    async fn execute_raw(&mut self, inputs: HashMap<String, PrismaValue>) -> connector::Result<usize> {
         catch(self.connection_info.clone(), async move {
-            write::execute_raw(&self.inner, query, parameters).await
+            write::execute_raw(&self.inner, inputs).await
         })
         .await
     }
 
-    async fn query_raw(&mut self, query: String, parameters: Vec<PrismaValue>) -> connector::Result<serde_json::Value> {
+    async fn query_raw(
+        &mut self,
+        _model: Option<&ModelRef>,
+        inputs: HashMap<String, PrismaValue>,
+        _query_type: Option<String>,
+    ) -> connector::Result<serde_json::Value> {
         catch(self.connection_info.clone(), async move {
-            write::query_raw(&self.inner, query, parameters).await
+            write::query_raw(&self.inner, inputs).await
         })
         .await
     }

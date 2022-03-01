@@ -2,6 +2,7 @@ mod autoincrement;
 mod composite_types;
 mod constraint_namespace;
 mod database_name;
+mod default_value;
 mod fields;
 mod indexes;
 mod models;
@@ -14,14 +15,23 @@ use crate::{ast, transform::ast_to_dml::db::walkers::RefinedRelationWalker};
 use diagnostics::DatamodelError;
 use names::Names;
 
-pub(super) fn validate(ctx: &mut Context<'_>, relation_transformation_enabled: bool) {
+pub(super) fn validate(ctx: &mut Context<'_>) {
     let db = ctx.db;
     let connector = ctx.connector;
 
     let names = Names::new(db, connector);
 
+    composite_types::detect_composite_cycles(ctx);
     for composite_type in db.walk_composite_types() {
         composite_types::composite_types_support(composite_type, ctx);
+
+        if !ctx.diagnostics.has_errors() {
+            composite_types::more_than_one_field(composite_type, ctx);
+
+            for field in composite_type.fields() {
+                composite_types::validate_default_value(field, ctx);
+            }
+        }
     }
 
     for model in db.walk_models() {
@@ -50,7 +60,7 @@ pub(super) fn validate(ctx: &mut Context<'_>, relation_transformation_enabled: b
             fields::validate_client_name(field.into(), &names, ctx);
             fields::has_a_unique_default_constraint_name(field, &names, ctx);
             fields::validate_native_type_arguments(field, ctx);
-            fields::validate_default(field, ctx);
+            fields::validate_default_value(field, ctx);
             fields::validate_unsupported_field_type(field, ctx)
         }
 
@@ -125,30 +135,38 @@ pub(super) fn validate(ctx: &mut Context<'_>, relation_transformation_enabled: b
                 relations::referencing_scalar_field_types(relation, ctx);
                 relations::has_a_unique_constraint_name(&names, relation, ctx);
 
-                // Only run these when you are not formatting the data model. These validations
-                // test against broken relations that we could fix with a code action. The flag is
-                // set when prisma-fmt calls this code.
-                if !relation_transformation_enabled {
-                    if relation.is_one_to_one() {
-                        relations::one_to_one::both_sides_are_defined(relation, ctx);
-                        relations::one_to_one::fields_and_references_are_defined(relation, ctx);
-                        relations::one_to_one::fields_and_references_defined_on_one_side_only(relation, ctx);
-                        relations::one_to_one::referential_actions(relation, ctx);
+                if relation.is_one_to_one() {
+                    relations::one_to_one::both_sides_are_defined(relation, ctx);
+                    relations::one_to_one::fields_and_references_are_defined(relation, ctx);
+                    relations::one_to_one::fields_and_references_defined_on_one_side_only(relation, ctx);
+                    relations::one_to_one::referential_actions(relation, ctx);
 
-                        // Run these validations last to prevent validation spam.
-                        relations::one_to_one::fields_references_mixups(relation, ctx);
-                        relations::one_to_one::back_relation_arity_is_optional(relation, ctx);
-                        relations::one_to_one::fields_and_references_on_wrong_side(relation, ctx);
-                    } else {
-                        relations::one_to_many::both_sides_are_defined(relation, ctx);
-                        relations::one_to_many::fields_and_references_are_defined(relation, ctx);
-                        relations::one_to_many::referential_actions(relation, ctx);
-                    }
+                    // Run these validations last to prevent validation spam.
+                    relations::one_to_one::fields_references_mixups(relation, ctx);
+                    relations::one_to_one::back_relation_arity_is_optional(relation, ctx);
+                    relations::one_to_one::fields_and_references_on_wrong_side(relation, ctx);
+                } else {
+                    relations::one_to_many::both_sides_are_defined(relation, ctx);
+                    relations::one_to_many::fields_and_references_are_defined(relation, ctx);
+                    relations::one_to_many::referential_actions(relation, ctx);
                 }
             }
             RefinedRelationWalker::ImplicitManyToMany(relation) => {
-                relations::many_to_many::validate_singular_id(relation, ctx);
-                relations::many_to_many::validate_no_referential_actions(relation, ctx);
+                use relations::many_to_many::implicit;
+
+                implicit::supports_implicit_relations(relation, ctx);
+                implicit::validate_singular_id(relation, ctx);
+                implicit::validate_no_referential_actions(relation, ctx);
+            }
+            RefinedRelationWalker::TwoWayEmbeddedManyToMany(relation) => {
+                use relations::many_to_many::embedded;
+
+                embedded::supports_embedded_relations(relation, ctx);
+                embedded::defines_references_on_both_sides(relation, ctx);
+                embedded::defines_fields_on_both_sides(relation, ctx);
+                embedded::references_id_from_both_sides(relation, ctx);
+                embedded::referencing_with_an_array_field_of_correct_type(relation, ctx);
+                embedded::validate_no_referential_actions(relation, ctx);
             }
         }
     }

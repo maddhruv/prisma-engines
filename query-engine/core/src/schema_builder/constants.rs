@@ -18,10 +18,6 @@ pub mod args {
     pub const BY: &str = "by";
     pub const HAVING: &str = "having";
 
-    // raw specific args
-    pub const QUERY: &str = "query";
-    pub const PARAMETERS: &str = "parameters";
-
     pub const DISTINCT: &str = "distinct";
 
     // createMany-specific args
@@ -29,7 +25,7 @@ pub mod args {
 }
 
 pub mod operations {
-    // nested operations
+    // nested operations and composites
     pub const CONNECT: &str = "connect";
     pub const CREATE: &str = "create";
     pub const CREATE_MANY: &str = "createMany";
@@ -42,8 +38,9 @@ pub mod operations {
     pub const UPSERT: &str = "upsert";
     pub const SET: &str = "set";
 
-    // scalar lists
+    // scalar lists and composites
     pub const PUSH: &str = "push";
+    pub const UNSET: &str = "unset";
 
     // numbers
     pub const INCREMENT: &str = "increment";

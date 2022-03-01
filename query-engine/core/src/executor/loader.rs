@@ -11,6 +11,7 @@ use datamodel::{
     },
     Datasource,
 };
+use mongodb_client::MongoConnectionString;
 use sql_connector::*;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -41,7 +42,7 @@ pub async fn load(
         MONGODB_SOURCE_NAME => {
             if !features.contains(&PreviewFeature::MongoDb) {
                 let error = CoreError::UnsupportedFeatureError(
-                    "MongoDB query connector (experimental feature, needs to be enabled)".into(),
+                    "MongoDB Query connector is a Preview feature and needs the `mongoDb` Preview feature flag. See https://www.prisma.io/docs/concepts/database-connectors/mongodb".into(),
                 );
 
                 return Err(error);
@@ -94,10 +95,17 @@ pub fn db_name(source: &Datasource, url: &str) -> crate::Result<String> {
         }
         #[cfg(feature = "mongodb")]
         MONGODB_SOURCE_NAME => {
-            let url = Url::parse(url)?;
-            let database = url.path().trim_start_matches('/').to_string();
+            let url: MongoConnectionString = url.parse().map_err(|e: mongodb_client::Error| match &e.kind {
+                mongodb_client::ErrorKind::InvalidArgument { message } => {
+                    CoreError::ConfigurationError(format!("Error parsing connection string: {}", message))
+                }
+                _ => {
+                    let kind = connector::error::ErrorKind::ConnectionError(e.into());
+                    CoreError::ConnectorError(connector::error::ConnectorError::from_kind(kind))
+                }
+            })?;
 
-            Ok(database)
+            Ok(url.database)
         }
         x => Err(CoreError::ConfigurationError(format!(
             "Unsupported connector type: {}",

@@ -1,34 +1,49 @@
 pub use crate::assertions::{MigrationsAssertions, ResultSetExt, SchemaAssertion};
 pub use expect_test::expect;
+pub use migration_core::json_rpc::types::{
+    DbExecuteDatasourceType, DbExecuteParams, DiffParams, DiffResult, SchemaContainer, UrlContainer,
+};
 pub use test_macros::test_connector;
-pub use test_setup::{BitFlags, Capabilities, Tags};
+pub use test_setup::{runtime::run_with_thread_local_runtime as tok, BitFlags, Capabilities, Tags};
 
 use crate::{commands::*, multi_engine_test_api::TestApi as RootTestApi};
 use datamodel::common::preview_features::PreviewFeature;
-use migration_core::migration_connector::{
-    ConnectorResult, DatabaseMigrationStepApplier, DiffTarget, EmptyHost, MigrationConnector, MigrationPersistence,
+use migration_core::{
+    commands::diff,
+    migration_connector::{
+        BoxFuture, ConnectorHost, ConnectorResult, DiffTarget, MigrationConnector, MigrationPersistence,
+    },
 };
 use quaint::{
     prelude::{ConnectionInfo, ResultSet},
     Value,
 };
 use sql_migration_connector::SqlMigrationConnector;
+use sql_schema_describer::SqlSchema;
 use std::{
     borrow::Cow,
     fmt::{Display, Write},
-    future::Future,
 };
 use tempfile::TempDir;
 use test_setup::{DatasourceBlock, TestApiArgs};
 
-/// For error testing.
-pub async fn rpc_api(schema: &str) -> ConnectorResult<()> {
-    migration_core::rpc_api(schema, Box::new(EmptyHost)).await.map(drop)
+#[derive(Debug, Default)]
+pub struct TestConnectorHost {
+    pub printed_messages: std::sync::Mutex<Vec<String>>,
+}
+
+impl ConnectorHost for TestConnectorHost {
+    fn print(&self, message: &str) -> BoxFuture<'_, ConnectorResult<()>> {
+        // https://github.com/prisma/prisma/issues/11761
+        assert!(message.ends_with('\n'));
+        self.printed_messages.lock().unwrap().push(message.to_owned());
+        Box::pin(std::future::ready(Ok(())))
+    }
 }
 
 pub struct TestApi {
     root: RootTestApi,
-    connector: SqlMigrationConnector,
+    pub connector: SqlMigrationConnector,
 }
 
 impl TestApi {
@@ -40,9 +55,13 @@ impl TestApi {
         TestApi { root, connector }
     }
 
+    pub fn args(&self) -> &TestApiArgs {
+        &self.root.args
+    }
+
     /// Plan an `applyMigrations` command
-    pub fn apply_migrations<'a>(&'a self, migrations_directory: &'a TempDir) -> ApplyMigrations<'a> {
-        ApplyMigrations::new_sync(&self.connector, migrations_directory, &self.root.rt)
+    pub fn apply_migrations<'a>(&'a mut self, migrations_directory: &'a TempDir) -> ApplyMigrations<'a> {
+        ApplyMigrations::new(&mut self.connector, migrations_directory)
     }
 
     pub fn connection_string(&self) -> &str {
@@ -53,8 +72,8 @@ impl TestApi {
         self.root.connection_info()
     }
 
-    pub fn ensure_connection_validity(&self) -> ConnectorResult<()> {
-        self.block_on(self.connector.ensure_connection_validity())
+    pub fn ensure_connection_validity(&mut self) -> ConnectorResult<()> {
+        tok(self.connector.ensure_connection_validity())
     }
 
     pub fn schema_name(&self) -> String {
@@ -63,12 +82,12 @@ impl TestApi {
 
     /// Plan a `createMigration` command
     pub fn create_migration<'a>(
-        &'a self,
+        &'a mut self,
         name: &'a str,
         schema: &'a str,
         migrations_directory: &'a TempDir,
     ) -> CreateMigration<'a> {
-        CreateMigration::new_sync(&self.connector, name, schema, migrations_directory, &self.root.rt)
+        CreateMigration::new(&mut self.connector, name, schema, migrations_directory)
     }
 
     /// Create a temporary directory to serve as a test migrations directory.
@@ -77,23 +96,34 @@ impl TestApi {
     }
 
     /// Builder and assertions to call the `devDiagnostic` command.
-    pub fn dev_diagnostic<'a>(&'a self, migrations_directory: &'a TempDir) -> DevDiagnostic<'a> {
-        DevDiagnostic::new(&self.connector, migrations_directory, &self.root.rt)
+    pub fn dev_diagnostic<'a>(&'a mut self, migrations_directory: &'a TempDir) -> DevDiagnostic<'a> {
+        DevDiagnostic::new(&mut self.connector, migrations_directory)
     }
 
-    pub fn diagnose_migration_history<'a>(&'a self, migrations_directory: &'a TempDir) -> DiagnoseMigrationHistory<'a> {
-        DiagnoseMigrationHistory::new_sync(&self.connector, migrations_directory, &self.root.rt)
+    pub fn diagnose_migration_history<'a>(
+        &'a mut self,
+        migrations_directory: &'a TempDir,
+    ) -> DiagnoseMigrationHistory<'a> {
+        DiagnoseMigrationHistory::new(&mut self.connector, migrations_directory)
     }
 
-    pub fn dump_table(&self, table_name: &str) -> ResultSet {
+    pub fn diff(&self, params: DiffParams) -> ConnectorResult<DiffResult> {
+        test_setup::runtime::run_with_thread_local_runtime(diff(params, self.connector.host().clone()))
+    }
+
+    pub fn dump_table(&mut self, table_name: &str) -> ResultSet {
         let select_star =
             quaint::ast::Select::from_table(self.render_table_name(table_name)).value(quaint::ast::asterisk());
 
         self.query(select_star.into())
     }
 
-    pub fn evaluate_data_loss<'a>(&'a self, migrations_directory: &'a TempDir, schema: String) -> EvaluateDataLoss<'a> {
-        EvaluateDataLoss::new(&self.connector, migrations_directory, schema, &self.root.rt)
+    pub fn evaluate_data_loss<'a>(
+        &'a mut self,
+        migrations_directory: &'a TempDir,
+        schema: String,
+    ) -> EvaluateDataLoss<'a> {
+        EvaluateDataLoss::new(&mut self.connector, migrations_directory, schema)
     }
 
     /// Returns true only when testing on MSSQL.
@@ -147,15 +177,18 @@ impl TestApi {
     }
 
     /// Insert test values
-    pub fn insert<'a>(&'a self, table_name: &'a str) -> SingleRowInsert<'a> {
+    pub fn insert<'a>(&'a mut self, table_name: &'a str) -> SingleRowInsert<'a> {
         SingleRowInsert {
             insert: quaint::ast::Insert::single_into(self.render_table_name(table_name)),
             api: self,
         }
     }
 
-    pub fn list_migration_directories<'a>(&'a self, migrations_directory: &'a TempDir) -> ListMigrationDirectories<'a> {
-        ListMigrationDirectories::new(&self.connector, migrations_directory, &self.root.rt)
+    pub fn list_migration_directories<'a>(
+        &'a mut self,
+        migrations_directory: &'a TempDir,
+    ) -> ListMigrationDirectories<'a> {
+        ListMigrationDirectories::new(migrations_directory)
     }
 
     pub fn lower_cases_table_names(&self) -> bool {
@@ -163,38 +196,26 @@ impl TestApi {
     }
 
     pub fn mark_migration_applied<'a>(
-        &'a self,
+        &'a mut self,
         migration_name: impl Into<String>,
         migrations_directory: &'a TempDir,
     ) -> MarkMigrationApplied<'a> {
-        MarkMigrationApplied::new(
-            &self.connector,
-            migration_name.into(),
-            migrations_directory,
-            &self.root.rt,
-        )
+        MarkMigrationApplied::new(&mut self.connector, migration_name.into(), migrations_directory)
     }
 
-    pub fn mark_migration_rolled_back(&self, migration_name: impl Into<String>) -> MarkMigrationRolledBack<'_> {
-        MarkMigrationRolledBack::new(&self.connector, migration_name.into(), &self.root.rt)
+    pub fn mark_migration_rolled_back(&mut self, migration_name: impl Into<String>) -> MarkMigrationRolledBack<'_> {
+        MarkMigrationRolledBack::new(&mut self.connector, migration_name.into())
     }
 
-    pub fn migration_persistence<'a>(&'a self) -> &(dyn MigrationPersistence + 'a) {
-        &self.connector
+    pub fn migration_persistence<'a>(&'a mut self) -> &mut (dyn MigrationPersistence + 'a) {
+        &mut self.connector
     }
 
     /// Assert facts about the database schema
     #[track_caller]
-    pub fn assert_schema(&self) -> SchemaAssertion {
-        SchemaAssertion::new(
-            self.root.block_on(self.connector.describe_schema()).unwrap(),
-            self.root.args.tags(),
-        )
-    }
-
-    /// Block on a future.
-    pub fn block_on<O, F: Future<Output = O>>(&self, f: F) -> O {
-        self.root.block_on(f)
+    pub fn assert_schema(&mut self) -> SchemaAssertion {
+        let schema: SqlSchema = tok(self.connector.describe_schema()).unwrap();
+        SchemaAssertion::new(schema, self.root.args.tags())
     }
 
     /// Render a valid datasource block, including database URL.
@@ -207,9 +228,11 @@ impl TestApi {
     }
 
     /// Generate a migration script using `MigrationConnector::diff()`.
-    pub fn diff(&self, from: DiffTarget<'_>, to: DiffTarget<'_>) -> String {
-        let migration = self.block_on(self.connector.diff(from, to)).unwrap();
-        self.connector.render_script(&migration, &Default::default())
+    pub fn connector_diff(&mut self, from: DiffTarget<'_>, to: DiffTarget<'_>) -> String {
+        let from = tok(self.connector.database_schema_from_diff_target(from, None)).unwrap();
+        let to = tok(self.connector.database_schema_from_diff_target(to, None)).unwrap();
+        let migration = self.connector.diff(from, to).unwrap();
+        self.connector.render_script(&migration, &Default::default()).unwrap()
     }
 
     pub fn normalize_identifier<'a>(&self, identifier: &'a str) -> Cow<'a, str> {
@@ -222,44 +245,45 @@ impl TestApi {
 
     /// Like quaint::Queryable::query()
     #[track_caller]
-    pub fn query(&self, q: quaint::ast::Query<'_>) -> ResultSet {
-        self.root.block_on(self.connector.query(q)).unwrap()
+    pub fn query(&mut self, q: quaint::ast::Query<'_>) -> ResultSet {
+        tok(self.connector.query(q)).unwrap()
     }
 
     /// Like quaint::Queryable::query_raw()
     #[track_caller]
-    pub fn query_raw(&self, q: &str, params: &[Value<'static>]) -> ResultSet {
-        self.root.block_on(self.connector.query_raw(q, params)).unwrap()
+    pub fn query_raw(&mut self, q: &str, params: &[Value<'static>]) -> ResultSet {
+        tok(self.connector.query_raw(q, params)).unwrap()
     }
 
     /// Send a SQL command to the database, and expect it to succeed.
     #[track_caller]
-    pub fn raw_cmd(&self, sql: &str) {
-        self.root.block_on(self.connector.raw_cmd(sql)).unwrap()
+    pub fn raw_cmd(&mut self, sql: &str) {
+        tok(self.connector.raw_cmd(sql)).unwrap()
     }
 
     /// Render a table name with the required prefixing for use with quaint query building.
-    pub fn render_table_name<'a>(&'a self, table_name: &'a str) -> quaint::ast::Table<'a> {
+    pub fn render_table_name(&self, table_name: &str) -> quaint::ast::Table<'static> {
         if self.root.is_sqlite() {
-            table_name.into()
+            table_name.to_owned().into()
         } else {
             (self.connection_info().schema_name().to_owned(), table_name.to_owned()).into()
         }
     }
 
     /// Plan a `reset` command
-    pub fn reset(&self) -> Reset<'_> {
-        Reset::new_sync(&self.connector, &self.root.rt)
+    pub fn reset(&mut self) -> Reset<'_> {
+        Reset::new(&mut self.connector)
     }
 
     /// Plan a `schemaPush` command adding the datasource
-    pub fn schema_push_w_datasource(&self, dm: impl Into<String>) -> SchemaPush<'_> {
-        SchemaPush::new(&self.connector, self.datamodel_with_provider(&dm.into()), &self.root.rt)
+    pub fn schema_push_w_datasource(&mut self, dm: impl Into<String>) -> SchemaPush<'_> {
+        let schema = self.datamodel_with_provider(&dm.into());
+        SchemaPush::new(&mut self.connector, schema)
     }
 
     /// Plan a `schemaPush` command
-    pub fn schema_push(&self, dm: impl Into<String>) -> SchemaPush<'_> {
-        SchemaPush::new(&self.connector, dm.into(), &self.root.rt)
+    pub fn schema_push(&mut self, dm: impl Into<String>) -> SchemaPush<'_> {
+        SchemaPush::new(&mut self.connector, dm.into())
     }
 
     pub fn tags(&self) -> BitFlags<Tags> {
@@ -325,7 +349,7 @@ impl TestApi {
 
 pub struct SingleRowInsert<'a> {
     insert: quaint::ast::SingleRowInsert<'a>,
-    api: &'a TestApi,
+    api: &'a mut TestApi,
 }
 
 impl<'a> SingleRowInsert<'a> {

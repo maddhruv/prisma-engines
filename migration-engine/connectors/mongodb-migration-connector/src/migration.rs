@@ -2,13 +2,17 @@ use mongodb_schema_describer::{CollectionId, IndexId, IndexType, MongoSchema};
 
 #[derive(Debug)]
 pub(crate) struct MongoDbMigration {
-    pub(crate) previous: MongoSchema,
-    pub(crate) next: MongoSchema,
+    pub(crate) previous: Box<MongoSchema>,
+    pub(crate) next: Box<MongoSchema>,
     pub(crate) steps: Vec<MongoDbMigrationStep>,
 }
 
 impl MongoDbMigration {
     pub(crate) fn summary(&self) -> String {
+        if self.steps.is_empty() {
+            return "No difference detected.".to_owned();
+        }
+
         let mut out = String::with_capacity(self.steps.len() * 10);
 
         for step in &self.steps {

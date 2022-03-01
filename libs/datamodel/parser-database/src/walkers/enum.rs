@@ -1,19 +1,24 @@
 use crate::{ast, walkers::Walker};
 
 /// An `enum` declaration in the schema.
-pub type EnumWalker<'ast, 'db> = Walker<'ast, 'db, ast::EnumId>;
+pub type EnumWalker<'db> = Walker<'db, ast::EnumId>;
 /// One value in an `enum` declaration in the schema.
-pub type EnumValueWalker<'ast, 'db> = Walker<'ast, 'db, (ast::EnumId, usize)>;
+pub type EnumValueWalker<'db> = Walker<'db, (ast::EnumId, usize)>;
 
-impl<'ast, 'db> EnumWalker<'ast, 'db> {
+impl<'db> EnumWalker<'db> {
     /// The name of the enum.
-    pub fn name(self) -> &'ast str {
+    pub fn name(self) -> &'db str {
         &self.ast_enum().name.name
     }
 
     /// The AST node.
-    pub fn ast_enum(self) -> &'ast ast::Enum {
+    pub fn ast_enum(self) -> &'db ast::Enum {
         &self.db.ast()[self.id]
+    }
+
+    /// The database name of the enum.
+    pub fn database_name(self) -> &'db str {
+        self.mapped_name().unwrap_or_else(|| self.name())
     }
 
     /// The mapped name of the enum:
@@ -28,12 +33,14 @@ impl<'ast, 'db> EnumWalker<'ast, 'db> {
     ///           ^^^^^^^
     /// }
     /// ```
-    pub fn mapped_name(self) -> Option<&'ast str> {
-        self.db.types.enum_attributes[&self.id].mapped_name
+    pub fn mapped_name(self) -> Option<&'db str> {
+        self.db.types.enum_attributes[&self.id]
+            .mapped_name
+            .map(|id| &self.db[id])
     }
 
     /// The values of the enum.
-    pub fn values(self) -> impl Iterator<Item = EnumValueWalker<'ast, 'db>> {
+    pub fn values(self) -> impl Iterator<Item = EnumValueWalker<'db>> {
         (0..self.ast_enum().values.len()).map(move |idx| Walker {
             db: self.db,
             id: (self.id, idx),
@@ -41,8 +48,8 @@ impl<'ast, 'db> EnumWalker<'ast, 'db> {
     }
 }
 
-impl<'ast, 'db> EnumValueWalker<'ast, 'db> {
-    fn r#enum(self) -> EnumWalker<'ast, 'db> {
+impl<'db> EnumValueWalker<'db> {
+    fn r#enum(self) -> EnumWalker<'db> {
         Walker {
             db: self.db,
             id: self.id.0,
@@ -50,7 +57,7 @@ impl<'ast, 'db> EnumValueWalker<'ast, 'db> {
     }
 
     /// The enum documentation
-    pub fn documentation(self) -> Option<&'ast str> {
+    pub fn documentation(self) -> Option<&'db str> {
         self.r#enum().ast_enum().values[self.id.1]
             .documentation
             .as_ref()
@@ -58,8 +65,13 @@ impl<'ast, 'db> EnumValueWalker<'ast, 'db> {
     }
 
     /// The name of the value.
-    pub fn name(self) -> &'ast str {
+    pub fn name(self) -> &'db str {
         &self.r#enum().ast_enum().values[self.id.1].name.name
+    }
+
+    /// The database name of the enum.
+    pub fn database_name(self) -> &'db str {
+        self.mapped_name().unwrap_or_else(|| self.name())
     }
 
     /// The mapped name of the value:
@@ -72,10 +84,10 @@ impl<'ast, 'db> EnumValueWalker<'ast, 'db> {
     ///     BLUE @map("schmurf")
     /// }
     /// ```
-    pub fn mapped_name(self) -> Option<&'ast str> {
+    pub fn mapped_name(self) -> Option<&'db str> {
         self.db.types.enum_attributes[&self.id.0]
             .mapped_values
             .get(&(self.id.1 as u32))
-            .cloned()
+            .map(|id| &self.db[*id])
     }
 }

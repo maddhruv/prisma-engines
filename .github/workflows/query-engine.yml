@@ -4,7 +4,13 @@ on:
     branches:
       - main
   pull_request:
-  
+      paths-ignore:
+      - '.buildkite/**'
+      - '*.md'
+      - 'LICENSE'
+      - 'CODEOWNERS'
+      - 'renovate.json'
+
 env:
   LOG_LEVEL: "info"
   LOG_QUERIES: "y"

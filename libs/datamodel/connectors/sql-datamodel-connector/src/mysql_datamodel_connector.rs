@@ -3,8 +3,8 @@ use datamodel_connector::{
     helper::{args_vec_from_opt, parse_one_opt_u32, parse_one_u32, parse_two_opt_u32},
     parser_database::walkers::ModelWalker,
     walker_ext_traits::*,
-    Connector, ConnectorCapability, ConstraintScope, Diagnostics, NativeTypeConstructor, NativeTypeInstance,
-    ReferentialAction, ReferentialIntegrity, ScalarType,
+    Connector, ConnectorCapability, ConstraintScope, DatamodelError, Diagnostics, NativeTypeConstructor,
+    NativeTypeInstance, ReferentialAction, ReferentialIntegrity, ScalarType,
 };
 use enumflags2::BitFlags;
 use native_types::{
@@ -108,13 +108,14 @@ const CAPABILITIES: &[ConnectorCapability] = &[
     ConnectorCapability::AutoIncrement,
     ConnectorCapability::CompoundIds,
     ConnectorCapability::AnyId,
-    ConnectorCapability::QueryRaw,
+    ConnectorCapability::SqlQueryRaw,
     ConnectorCapability::NamedForeignKeys,
     ConnectorCapability::AdvancedJsonNullability,
     ConnectorCapability::IndexColumnLengthPrefixing,
     ConnectorCapability::FullTextIndex,
     ConnectorCapability::FullTextSearchWithIndex,
     ConnectorCapability::MultipleFullTextAttributesPerModel,
+    ConnectorCapability::ImplicitManyToManyRelation,
 ];
 
 const CONSTRAINT_SCOPES: &[ConstraintScope] = &[ConstraintScope::GlobalForeignKey, ConstraintScope::ModelKeyIndex];
@@ -257,12 +258,9 @@ impl Connector for MySqlDatamodelConnector {
         }
     }
 
-    fn validate_model(&self, model: ModelWalker<'_, '_>, errors: &mut Diagnostics) {
+    fn validate_model(&self, model: ModelWalker<'_>, errors: &mut Diagnostics) {
         let mut push_error = |err: ConnectorError| {
-            errors.push_error(datamodel_connector::DatamodelError::ConnectorError {
-                message: err.to_string(),
-                span: model.ast_model().span,
-            });
+            errors.push_error(DatamodelError::new_connector_error(err, model.ast_model().span));
         };
 
         for index in model.indexes() {

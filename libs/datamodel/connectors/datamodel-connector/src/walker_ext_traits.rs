@@ -4,20 +4,20 @@ use crate::{
 use parser_database::{ast, walkers::*};
 use std::borrow::Cow;
 
-pub trait IndexWalkerExt<'ast> {
-    fn final_database_name(self, connector: &dyn Connector) -> Cow<'ast, str>;
+pub trait IndexWalkerExt<'db> {
+    fn constraint_name(self, connector: &dyn Connector) -> Cow<'db, str>;
 }
 
-impl<'ast> IndexWalkerExt<'ast> for IndexWalker<'ast, '_> {
-    fn final_database_name(self, connector: &dyn Connector) -> Cow<'ast, str> {
+impl<'db> IndexWalkerExt<'db> for IndexWalker<'db> {
+    fn constraint_name(self, connector: &dyn Connector) -> Cow<'db, str> {
         if let Some(mapped_name) = self.mapped_name() {
             return Cow::from(mapped_name);
         }
 
         let model = self.model();
-        let model_db_name = model.final_database_name();
+        let model_db_name = model.database_name();
         let field_db_names: Vec<&str> = model
-            .get_field_db_names(&self.fields().map(|f| f.field_id()).collect::<Vec<_>>())
+            .get_field_database_names(&self.fields().map(|f| f.field_id()).collect::<Vec<_>>())
             .collect();
 
         if self.is_unique() {
@@ -28,15 +28,15 @@ impl<'ast> IndexWalkerExt<'ast> for IndexWalker<'ast, '_> {
     }
 }
 
-pub trait DefaultValueExt<'ast> {
-    fn constraint_name(self, connector: &dyn Connector) -> Cow<'ast, str>;
+pub trait DefaultValueExt<'db> {
+    fn constraint_name(self, connector: &dyn Connector) -> Cow<'db, str>;
 }
 
-impl<'ast> DefaultValueExt<'ast> for DefaultValueWalker<'ast, '_> {
-    fn constraint_name(self, connector: &dyn Connector) -> Cow<'ast, str> {
+impl<'db> DefaultValueExt<'db> for DefaultValueWalker<'db> {
+    fn constraint_name(self, connector: &dyn Connector) -> Cow<'db, str> {
         self.mapped_name().map(Cow::from).unwrap_or_else(|| {
             let name = ConstraintNames::default_name(
-                self.field().model().final_database_name(),
+                self.field().model().database_name(),
                 self.field().database_name(),
                 connector,
             );
@@ -46,31 +46,33 @@ impl<'ast> DefaultValueExt<'ast> for DefaultValueWalker<'ast, '_> {
     }
 }
 
-pub trait PrimaryKeyWalkerExt<'ast> {
-    fn final_database_name(self, connector: &dyn Connector) -> Option<Cow<'ast, str>>;
+pub trait PrimaryKeyWalkerExt<'db> {
+    /// This will be None if and only if the connector does not support named primary keys. It can
+    /// be a generated name or one explicitly set in the schema.
+    fn constraint_name(self, connector: &dyn Connector) -> Option<Cow<'db, str>>;
 }
 
-impl<'ast> PrimaryKeyWalkerExt<'ast> for PrimaryKeyWalker<'ast, '_> {
-    fn final_database_name(self, connector: &dyn Connector) -> Option<Cow<'ast, str>> {
+impl<'db> PrimaryKeyWalkerExt<'db> for PrimaryKeyWalker<'db> {
+    fn constraint_name(self, connector: &dyn Connector) -> Option<Cow<'db, str>> {
         if !connector.supports_named_primary_keys() {
             return None;
         }
 
         Some(
-            self.mapped_name().map(Cow::Borrowed).unwrap_or_else(|| {
-                ConstraintNames::primary_key_name(self.model().final_database_name(), connector).into()
-            }),
+            self.mapped_name()
+                .map(Cow::Borrowed)
+                .unwrap_or_else(|| ConstraintNames::primary_key_name(self.model().database_name(), connector).into()),
         )
     }
 }
 
-pub trait CompleteInlineRelationWalkerExt<'ast> {
+pub trait CompleteInlineRelationWalkerExt<'db> {
     /// Gives the onDelete referential action of the relation. If not defined
     /// explicitly, returns the default value.
     fn on_delete(self, connector: &dyn Connector, referential_integrity: ReferentialIntegrity) -> ReferentialAction;
 }
 
-impl<'ast> CompleteInlineRelationWalkerExt<'ast> for CompleteInlineRelationWalker<'ast, '_> {
+impl<'db> CompleteInlineRelationWalkerExt<'db> for CompleteInlineRelationWalker<'db> {
     fn on_delete(self, connector: &dyn Connector, referential_integrity: ReferentialIntegrity) -> ReferentialAction {
         use crate::ReferentialAction::*;
 
@@ -86,14 +88,14 @@ impl<'ast> CompleteInlineRelationWalkerExt<'ast> for CompleteInlineRelationWalke
     }
 }
 
-pub trait InlineRelationWalkerExt<'ast> {
-    fn constraint_name(self, connector: &dyn Connector) -> Cow<'ast, str>;
+pub trait InlineRelationWalkerExt<'db> {
+    fn constraint_name(self, connector: &dyn Connector) -> Cow<'db, str>;
 }
 
-impl<'ast> InlineRelationWalkerExt<'ast> for InlineRelationWalker<'ast, '_> {
-    fn constraint_name(self, connector: &dyn Connector) -> Cow<'ast, str> {
-        self.foreign_key_name().map(Cow::Borrowed).unwrap_or_else(|| {
-            let model_database_name = self.referencing_model().final_database_name();
+impl<'db> InlineRelationWalkerExt<'db> for InlineRelationWalker<'db> {
+    fn constraint_name(self, connector: &dyn Connector) -> Cow<'db, str> {
+        self.mapped_name().map(Cow::Borrowed).unwrap_or_else(|| {
+            let model_database_name = self.referencing_model().database_name();
             let field_names: Vec<&str> = match self.referencing_fields() {
                 ReferencingFields::Concrete(fields) => fields.map(|f| f.database_name()).collect(),
                 ReferencingFields::Inferred(fields) => {
@@ -116,9 +118,27 @@ pub trait ScalarFieldWalkerExt {
     fn native_type_instance(&self, connector: &dyn Connector) -> Option<NativeTypeInstance>;
 }
 
-impl ScalarFieldWalkerExt for ScalarFieldWalker<'_, '_> {
+impl ScalarFieldWalkerExt for ScalarFieldWalker<'_> {
     fn native_type_instance(&self, connector: &dyn Connector) -> Option<NativeTypeInstance> {
         self.raw_native_type()
             .and_then(|(_, name, args, _)| connector.parse_native_type(name, args.to_owned()).ok())
+    }
+}
+
+pub trait RelationFieldWalkerExt {
+    fn default_on_delete_action(self, integrity: ReferentialIntegrity, connector: &dyn Connector) -> ReferentialAction;
+}
+
+impl RelationFieldWalkerExt for RelationFieldWalker<'_> {
+    fn default_on_delete_action(self, integrity: ReferentialIntegrity, connector: &dyn Connector) -> ReferentialAction {
+        match self.referential_arity() {
+            ast::FieldArity::Required
+                if connector.supports_referential_action(&integrity, ReferentialAction::Restrict) =>
+            {
+                ReferentialAction::Restrict
+            }
+            ast::FieldArity::Required => ReferentialAction::NoAction,
+            _ => ReferentialAction::SetNull,
+        }
     }
 }

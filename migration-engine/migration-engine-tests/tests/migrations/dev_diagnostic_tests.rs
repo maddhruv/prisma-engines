@@ -1,10 +1,26 @@
-use migration_core::{
-    commands::{CreateMigrationOutput, DevDiagnosticInput, DevDiagnosticOutput},
-    migration_api,
-};
+use migration_core::{json_rpc::types::*, migration_api};
 use migration_engine_tests::test_api::*;
 use pretty_assertions::assert_eq;
+use std::io::Write;
 use user_facing_errors::{migration_engine::MigrationDoesNotApplyCleanly, UserFacingError};
+
+trait DevActionExt {
+    fn is_create_migration(&self) -> bool;
+    fn as_reset(&self) -> Option<&str>;
+}
+
+impl DevActionExt for DevAction {
+    fn is_create_migration(&self) -> bool {
+        matches!(self, DevAction::CreateMigration)
+    }
+
+    fn as_reset(&self) -> Option<&str> {
+        match self {
+            DevAction::Reset(rst) => Some(&rst.reason),
+            _ => None,
+        }
+    }
+}
 
 #[test_connector]
 fn dev_diagnostic_on_an_empty_database_without_migration_returns_create_migration(api: TestApi) {
@@ -114,22 +130,25 @@ fn dev_diagnostic_calculates_drift_in_presence_of_failed_migrations(api: TestApi
     "#,
     );
 
-    let migration_two = api
-        .create_migration("02_add_dogs", &dm2, &directory)
-        .send_sync()
-        .modify_migration(|migration| {
-            migration.push_str("\nSELECT YOLO;");
-        });
+    let mut original_migration = String::new();
+    let (migration_two_name, migration_two_path) = {
+        let out = api
+            .create_migration("02_add_dogs", &dm2, &directory)
+            .send_sync()
+            .modify_migration(|migration| {
+                original_migration.push_str(migration);
+                migration.push_str("\nSELECT YOLO;");
+            });
+        let path = out.migration_script_path();
+        (out.into_output().generated_migration_name.unwrap(), path)
+    };
 
     let err = api.apply_migrations(&directory).send_unwrap_err().to_string();
     assert!(err.contains("yolo") || err.contains("YOLO"), "{}", err);
 
-    let migration_two =
-        migration_two.modify_migration(|migration| migration.truncate(migration.len() - "SELECT YOLO;".len()));
+    std::fs::write(migration_two_path, original_migration.as_bytes()).unwrap();
 
     let DevDiagnosticOutput { action } = api.dev_diagnostic(&directory).send().into_output();
-
-    let migration_two_name = migration_two.into_output().generated_migration_name.unwrap();
 
     let expected_message = format!(
         "- The migration `{}` failed.\n- The migration `{}` was modified after it was applied.\n- Drift detected: Your database schema is not in sync with your migration history.\n",
@@ -304,7 +323,11 @@ fn dev_diagnostic_can_detect_edited_migrations(api: TestApi) {
     "#,
     );
 
-    let initial_assertions = api.create_migration("initial", &dm1, &directory).send_sync();
+    let (initial_migration_name, initial_path) = {
+        let out = api.create_migration("initial", &dm1, &directory).send_sync();
+        let path = out.migration_script_path();
+        (out.into_output().generated_migration_name.unwrap(), path)
+    };
 
     let dm2 = api.datamodel_with_provider(
         r#"
@@ -322,13 +345,12 @@ fn dev_diagnostic_can_detect_edited_migrations(api: TestApi) {
         .send_sync()
         .assert_applied_migrations(&["initial", "second-migration"]);
 
-    let initial_migration_name = initial_assertions
-        .modify_migration(|script| {
-            std::mem::swap(script, &mut format!("/* test */\n{}", script));
-        })
-        .into_output()
-        .generated_migration_name
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .append(true)
+        .open(initial_path)
         .unwrap();
+    file.write_all(b"-- test\nSELECT 1;").unwrap();
 
     let DevDiagnosticOutput { action } = api.dev_diagnostic(&directory).send().into_output();
 
@@ -353,7 +375,11 @@ fn dev_diagnostic_reports_migrations_failing_to_apply_cleanly(api: TestApi) {
     "#,
     );
 
-    let initial_assertions = api.create_migration("initial", &dm1, &directory).send_sync();
+    let (initial_migration_name, initial_path) = {
+        let out = api.create_migration("initial", &dm1, &directory).send_sync();
+        let path = out.migration_script_path();
+        (out.into_output().generated_migration_name.unwrap(), path)
+    };
 
     let dm2 = api.datamodel_with_provider(
         r#"
@@ -371,13 +397,12 @@ fn dev_diagnostic_reports_migrations_failing_to_apply_cleanly(api: TestApi) {
         .send_sync()
         .assert_applied_migrations(&["initial", "second-migration"]);
 
-    let initial_migration_name = initial_assertions
-        .modify_migration(|script| {
-            script.push_str("SELECT YOLO;\n");
-        })
-        .into_output()
-        .generated_migration_name
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .append(true)
+        .open(initial_path)
         .unwrap();
+    file.write_all(b"SELECT YOLO;\n").unwrap();
 
     let err = api.dev_diagnostic(&directory).send_unwrap_err().to_user_facing();
 
@@ -606,18 +631,17 @@ fn dev_diagnostic_shadow_database_creation_error_is_special_cased_mysql(api: Tes
         dbport = db_url.port().unwrap_or(3306),
     );
 
-    let err = api
-        .block_on(async {
-            let migration_api = migration_api(&datamodel).unwrap();
-            migration_api
-                .dev_diagnostic(&DevDiagnosticInput {
-                    migrations_directory_path: directory.path().as_os_str().to_string_lossy().into_owned(),
-                })
-                .await
-        })
-        .unwrap_err()
-        .to_user_facing()
-        .unwrap_known();
+    let err = tok(async {
+        let migration_api = migration_api(Some(datamodel), None).unwrap();
+        migration_api
+            .dev_diagnostic(DevDiagnosticInput {
+                migrations_directory_path: directory.path().as_os_str().to_string_lossy().into_owned(),
+            })
+            .await
+    })
+    .unwrap_err()
+    .to_user_facing()
+    .unwrap_known();
 
     assert!(err.message.starts_with("Prisma Migrate could not create the shadow database. Please make sure the database user has permission to create databases. Read more about the shadow database (and workarounds) at https://pris.ly/d/migrate-shadow"), "{:?}", err);
 }
@@ -655,18 +679,17 @@ fn dev_diagnostic_shadow_database_creation_error_is_special_cased_postgres(api: 
         dbport = db_url.port().unwrap(),
     );
 
-    let err = api
-        .block_on(async {
-            let migration_api = migration_api(&datamodel).unwrap();
-            migration_api
-                .dev_diagnostic(&DevDiagnosticInput {
-                    migrations_directory_path: directory.path().as_os_str().to_string_lossy().into_owned(),
-                })
-                .await
-        })
-        .unwrap_err()
-        .to_user_facing()
-        .unwrap_known();
+    let err = tok(async move {
+        let migration_api = migration_api(Some(datamodel), None).unwrap();
+        migration_api
+            .dev_diagnostic(DevDiagnosticInput {
+                migrations_directory_path: directory.path().as_os_str().to_string_lossy().into_owned(),
+            })
+            .await
+    })
+    .unwrap_err()
+    .to_user_facing()
+    .unwrap_known();
 
     assert!(err.message.starts_with("Prisma Migrate could not create the shadow database. Please make sure the database user has permission to create databases. Read more about the shadow database (and workarounds) at https://pris.ly/d/migrate-shadow"));
 }

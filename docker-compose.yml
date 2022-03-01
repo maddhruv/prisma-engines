@@ -131,11 +131,10 @@ services:
     tmpfs: /var/lib/mysql
 
   mysql-8-0:
-    image: mysql:8.0.22
+    image: mysql:8.0.28
     command: mysqld
     restart: always
     environment:
-      MYSQL_USER: root
       MYSQL_ROOT_PASSWORD: prisma
       MYSQL_DATABASE: prisma
     ports:
@@ -158,7 +157,7 @@ services:
     tmpfs: /var/lib/mariadb
 
   vitess-test-5_7:
-    image: vitess/vttestserver:mysql57@sha256:b1f8eed5d43e3836a65e2cb4b373441a92989bb44af0c352b195f058ce139c08
+    image: vitess/vttestserver:mysql57@sha256:2b132a22d08b3b227d9391f8f58ed7ab5c081ca07bf0f87a0c166729124d360a
     restart: always
     ports:
       - 33577:33577
@@ -170,7 +169,7 @@ services:
       FOREIGN_KEY_MODE: "disallow"
 
   vitess-test-8_0:
-    image: vitess/vttestserver:mysql80@sha256:5fec546e3f2ba50237b78938982a72bf17eacbc97f18ab877774f22d6e2e9682
+    image: vitess/vttestserver:mysql80@sha256:9412e3d51bde38e09c3039090b5c68808e299579f12c79178a4ec316f7831889
     restart: always
     ports:
       - 33807:33807
@@ -182,7 +181,7 @@ services:
       FOREIGN_KEY_MODE: "disallow"
 
   vitess-shadow-5_7:
-    image: vitess/vttestserver:mysql57@sha256:b1f8eed5d43e3836a65e2cb4b373441a92989bb44af0c352b195f058ce139c08
+    image: vitess/vttestserver:mysql57@sha256:2b132a22d08b3b227d9391f8f58ed7ab5c081ca07bf0f87a0c166729124d360a
     restart: always
     ports:
       - 33578:33577
@@ -194,7 +193,7 @@ services:
       FOREIGN_KEY_MODE: "disallow"
 
   vitess-shadow-8_0:
-    image: vitess/vttestserver:mysql80@sha256:5fec546e3f2ba50237b78938982a72bf17eacbc97f18ab877774f22d6e2e9682
+    image: vitess/vttestserver:mysql80@sha256:9412e3d51bde38e09c3039090b5c68808e299579f12c79178a4ec316f7831889
     restart: always
     ports:
       - 33808:33807
@@ -262,8 +261,20 @@ services:
     networks:
       - databases
 
-  mongo4-single:
-    image: mongo:4
+  mongo42-single:
+    image: mongo:4.2
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: "prisma"
+      MONGO_INITDB_ROOT_PASSWORD: "prisma"
+      INIT_WAIT_SEC: $INIT_WAIT_SEC
+    ports:
+      - "27016:27017"
+    networks:
+      - databases
+
+  mongo44-single:
+    image: mongo:4.4
     restart: always
     environment:
       MONGO_INITDB_ROOT_USERNAME: "prisma"
@@ -311,25 +322,12 @@ services:
     networks:
       - databases
 
-  jaeger:
-    image: jaegertracing/all-in-one:latest
-    restart: always
+  otel:
+    image: jaegertracing/opentelemetry-all-in-one:latest
     ports:
-      - "16686:16686" # the trace viewer (http)
-    networks:
-      - telemetry
-
-  otel-agent:
-    image: otel/opentelemetry-collector-dev:latest
-    command: [ "--config=/etc/otel-agent-config.yaml" ]
-    restart: always
-    volumes:
-      - ./otel-agent-config.yaml:/etc/otel-agent-config.yaml
-    ports:
-      - 13133:13133 # health check port
-      - 16686:16686 # UI viewer
-      - 4317:55680 # Otel endpoint
+      - 13133:13133
+      - 16686:16686
+      - 4317:55680
 
 networks:
   databases: null
-  telemetry: null

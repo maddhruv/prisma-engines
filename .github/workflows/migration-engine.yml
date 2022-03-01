@@ -4,6 +4,13 @@ on:
     branches:
       - main
   pull_request:
+    paths-ignore:
+      - '.buildkite/**'
+      - '*.md'
+      - 'LICENSE'
+      - 'CODEOWNERS'
+      - 'renovate.json'
+
 jobs:
   test-mongodb-introspection-and-migration-connector:
     name: "Test ${{ matrix.database.name }} on Linux"
@@ -11,7 +18,9 @@ jobs:
       fail-fast: false
       matrix:
         database:
-          - name: "mongodb4"
+          - name: "mongodb42"
+            url: "mongodb://prisma:prisma@localhost:27016/?authSource=admin&retryWrites=true"
+          - name: "mongodb44"
             url: "mongodb://prisma:prisma@localhost:27017/?authSource=admin&retryWrites=true"
           - name: "mongodb5"
             url: "mongodb://prisma:prisma@localhost:27018/?authSource=admin&retryWrites=true"
@@ -127,14 +136,15 @@ jobs:
           TEST_DATABASE_URL: ${{ matrix.database.url }}
 
       - run: cargo test -p migration-engine-tests
-        if: ${{ !matrix.database.is_cockroach && !matrix.database.single_threaded }}
+        if: ${{ !matrix.database.single_threaded }}
+        continue-on-error: ${{ matrix.database.is_cockroach || false }}
         env:
           CLICOLOR_FORCE: 1
           TEST_DATABASE_URL: ${{ matrix.database.url }}
           RUST_LOG: debug
 
       - run: cargo test -p migration-engine-cli
-        if: ${{ !matrix.database.is_cockroach && !matrix.database.single_threaded }}
+        if: ${{ !matrix.database.single_threaded }}
         env:
           CLICOLOR_FORCE: 1
           TEST_DATABASE_URL: ${{ matrix.database.url }}
@@ -211,13 +221,13 @@ jobs:
         with:
           toolchain: ${{matrix.rust}}
 
-      # - uses: actions/cache@v2
-      #   with:
-      #     path: |
-      #       ~/.cargo/registry
-      #       ~/.cargo/git
-      #       target
-      #     key: ${{ runner.os }}-cargo-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
+      - uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
 
       - uses: MinoruSekine/setup-scoop@main
 

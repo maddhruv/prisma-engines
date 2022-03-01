@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use dml::FieldArity;
 use prisma_models::*;
 use prisma_value::PrismaValue;
+use std::collections::HashMap;
 
 #[async_trait]
 pub trait Connector {
@@ -222,6 +223,7 @@ pub trait ReadOperations {
         filter: &Filter,
         selected_fields: &FieldSelection,
         aggregation_selections: &[RelAggregationSelection],
+        trace_id: Option<String>,
     ) -> crate::Result<Option<SingleRecord>>;
 
     /// Gets multiple records from the database.
@@ -236,6 +238,7 @@ pub trait ReadOperations {
         query_arguments: QueryArguments,
         selected_fields: &FieldSelection,
         aggregation_selections: &[RelAggregationSelection],
+        trace_id: Option<String>,
     ) -> crate::Result<ManyRecords>;
 
     /// Retrieves pairs of IDs that belong together from a intermediate join
@@ -249,6 +252,7 @@ pub trait ReadOperations {
         &mut self,
         from_field: &RelationFieldRef,
         from_record_ids: &[SelectionResult],
+        trace_id: Option<String>,
     ) -> crate::Result<Vec<(SelectionResult, SelectionResult)>>;
 
     /// Aggregates records for a specific model based on the given selections.
@@ -263,13 +267,19 @@ pub trait ReadOperations {
         selections: Vec<AggregationSelection>,
         group_by: Vec<ScalarFieldRef>,
         having: Option<Filter>,
+        trace_id: Option<String>,
     ) -> crate::Result<Vec<AggregationRow>>;
 }
 
 #[async_trait]
 pub trait WriteOperations {
     /// Insert a single record to the database.
-    async fn create_record(&mut self, model: &ModelRef, args: WriteArgs) -> crate::Result<SelectionResult>;
+    async fn create_record(
+        &mut self,
+        model: &ModelRef,
+        args: WriteArgs,
+        trace_id: Option<String>,
+    ) -> crate::Result<SelectionResult>;
 
     /// Inserts many records at once into the database.
     async fn create_records(
@@ -277,6 +287,7 @@ pub trait WriteOperations {
         model: &ModelRef,
         args: Vec<WriteArgs>,
         skip_duplicates: bool,
+        trace_id: Option<String>,
     ) -> crate::Result<usize>;
 
     /// Update records in the `Model` with the given `WriteArgs` filtered by the
@@ -286,10 +297,16 @@ pub trait WriteOperations {
         model: &ModelRef,
         record_filter: RecordFilter,
         args: WriteArgs,
+        trace_id: Option<String>,
     ) -> crate::Result<Vec<SelectionResult>>;
 
     /// Delete records in the `Model` with the given `Filter`.
-    async fn delete_records(&mut self, model: &ModelRef, record_filter: RecordFilter) -> crate::Result<usize>;
+    async fn delete_records(
+        &mut self,
+        model: &ModelRef,
+        record_filter: RecordFilter,
+        trace_id: Option<String>,
+    ) -> crate::Result<usize>;
 
     // We plan to remove the methods below in the future. We want emulate them with the ones above. Those should suffice.
 
@@ -307,17 +324,23 @@ pub trait WriteOperations {
         field: &RelationFieldRef,
         parent_id: &SelectionResult,
         child_ids: &[SelectionResult],
+        trace_id: Option<String>,
     ) -> crate::Result<()>;
 
-    /// Execute the raw query in the database as-is. The `parameters` are
-    /// parameterized values for databases that support prepared statements.
+    /// Execute the raw query in the database as-is.
+    /// The parsing of the query arguments is deferred to the connectors.
     ///
     /// Returns the number of rows affected.
-    async fn execute_raw(&mut self, query: String, parameters: Vec<PrismaValue>) -> crate::Result<usize>;
+    async fn execute_raw(&mut self, inputs: HashMap<String, PrismaValue>) -> crate::Result<usize>;
 
-    /// Execute the raw query in the database as-is. The `parameters` are
-    /// parameterized values for databases that support prepared statements.
+    /// Execute the raw query in the database as-is.
+    /// The parsing of the query arguments is deferred to the connectors.
     ///
     /// Returns resulting rows as JSON.
-    async fn query_raw(&mut self, query: String, parameters: Vec<PrismaValue>) -> crate::Result<serde_json::Value>;
+    async fn query_raw(
+        &mut self,
+        model: Option<&ModelRef>,
+        inputs: HashMap<String, PrismaValue>,
+        query_type: Option<String>,
+    ) -> crate::Result<serde_json::Value>;
 }

@@ -4,9 +4,9 @@ use crate::{
     pair::Pair,
     sql_migration::{AlterEnum, AlterTable, RedefineTable, TableChange},
 };
+use datamodel::PrismaValue;
 use indoc::formatdoc;
 use once_cell::sync::Lazy;
-use prisma_value::PrismaValue;
 use regex::Regex;
 use sql_ddl::sqlite as ddl;
 use sql_schema_describer::{walkers::*, *};
@@ -81,7 +81,10 @@ impl SqlRenderer for SqliteFlavour {
 
         for change in changes {
             match change {
-                TableChange::AddColumn { column_id } => {
+                TableChange::AddColumn {
+                    column_id,
+                    has_virtual_default: _,
+                } => {
                     let column = tables.next().column_at(*column_id);
                     let col_sql = render_column(&column);
 

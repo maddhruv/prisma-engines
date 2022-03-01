@@ -14,6 +14,7 @@ members = [
   "migration-engine/connectors/sql-migration-connector",
   "migration-engine/connectors/mongodb-migration-connector",
   "migration-engine/core",
+  "migration-engine/json-rpc-api-build",
   "migration-engine/migration-engine-tests",
   "migration-engine/qe-setup",
   "query-engine/connectors/query-connector",
@@ -30,6 +31,7 @@ members = [
   "libs/datamodel/diagnostics",
   "libs/datamodel/parser-database",
   "libs/datamodel/schema-ast",
+  "libs/datamodel/dmmf",
   "libs/json-rpc-stdio",
   "libs/native-types",
   "libs/prisma-inflector",
@@ -37,6 +39,7 @@ members = [
   "libs/sql-ddl",
   "libs/sql-schema-describer",
   "libs/mongodb-schema-describer",
+  "libs/mongodb-client",
   "libs/test-cli",
   "libs/user-facing-errors",
 ]

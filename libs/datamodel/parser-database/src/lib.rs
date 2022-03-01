@@ -12,21 +12,25 @@
 //!
 //! Names:
 //!
+//! - _name_: the item name in the schema for datasources, generators, models, model fields,
+//!   composite types, composite type fields, enums and enum variants. The `name:` argument for
+//!   unique constraints, primary keys and relations.
 //! - _mapped name_: the name inside an `@map()` or `@@map()` attribute of a model, field, enum or
 //!   enum value. This is used to determine what the name of the Prisma schema item is in the
 //!   database.
 //! - _database name_: the name in the database, once both the name of the item and the mapped
 //!   name have been taken into account. The logic is always the same: if a mapped name is defined,
 //!   then the database name is the mapped name, otherwise it is the name of the item.
-//! - _foreign key name_: the name inside the `map: ...` argument inside an `@relation()`
-//!   attribute. This is taken as the database name of the constraint backing the relation, on the
-//!   connectors where that makes sense.
+//! - _constraint name_: indexes, primary keys and defaults can have a constraint name. It can be
+//!   defined with a `map:` argument or be a default, generated name if the `map:` argument is not
+//!   provided. These usually require a datamodel connector to be defined.
 
 pub mod walkers;
 
 mod attributes;
 mod context;
 mod indexes;
+mod interner;
 mod names;
 mod relations;
 mod types;
@@ -38,7 +42,7 @@ pub use schema_ast::ast;
 pub use types::{IndexAlgorithm, IndexType, ScalarFieldType, ScalarType, SortOrder};
 pub use value_validator::{ValueListValidator, ValueValidator};
 
-use self::{context::Context, relations::Relations, types::Types};
+use self::{context::Context, interner::StringId, relations::Relations, types::Types};
 use diagnostics::{DatamodelError, Diagnostics};
 use names::Names;
 
@@ -61,47 +65,49 @@ use names::Names;
 ///   fields.
 /// - Global validations are then performed on the mostly validated schema.
 ///   Currently only index name collisions.
-///
-/// ## Lifetimes
-///
-/// Throughout the ParserDatabase implementation, you will see many lifetime
-/// annotations. The only significant lifetime is the lifetime of the reference
-/// to the AST contained in ParserDatabase, that we call by convention `'ast`.
-/// Apart from that, everything should be owned or locally borrowed, to keep
-/// lifetime management simple.
-pub struct ParserDatabase<'ast> {
-    ast: &'ast ast::SchemaAst,
-    names: Names<'ast>,
-    types: Types<'ast>,
-    relations: Relations<'ast>,
+pub struct ParserDatabase {
+    ast: ast::SchemaAst,
+    interner: interner::StringInterner,
+    _names: Names,
+    types: Types,
+    relations: Relations,
 }
 
-impl<'ast> ParserDatabase<'ast> {
+impl ParserDatabase {
     /// See the docs on [ParserDatabase](/struct.ParserDatabase.html).
-    pub fn new(ast: &'ast ast::SchemaAst, diagnostics: Diagnostics) -> (Self, Diagnostics) {
-        let db = ParserDatabase {
-            ast,
-            names: Names::default(),
-            types: Types::default(),
-            relations: Relations::default(),
-        };
-
-        let mut ctx = Context::new(db, diagnostics);
+    pub fn new(ast: ast::SchemaAst, diagnostics: &mut Diagnostics) -> Self {
+        let mut interner = Default::default();
+        let mut names = Default::default();
+        let mut types = Default::default();
+        let mut relations = Default::default();
+        let mut ctx = Context::new(&ast, &mut interner, &mut names, &mut types, &mut relations, diagnostics);
 
         // First pass: resolve names.
         names::resolve_names(&mut ctx);
 
         // Return early on name resolution errors.
-        if ctx.has_errors() {
-            return ctx.finish();
+        if ctx.diagnostics.has_errors() {
+            return ParserDatabase {
+                ast,
+                interner,
+                _names: names,
+                types,
+                relations,
+            };
         }
 
         // Second pass: resolve top-level items and field types.
         types::resolve_types(&mut ctx);
 
         // Return early on type resolution errors.
-        if ctx.has_errors() {
-            return ctx.finish();
+        if ctx.diagnostics.has_errors() {
+            return ParserDatabase {
+                ast,
+                interner,
+                _names: names,
+                types,
+                relations,
+            };
         }
 
         // Third pass: validate model and field attributes. All these
@@ -115,7 +121,13 @@ impl<'ast> ParserDatabase<'ast> {
         // Fifth step: infer implicit indices
         indexes::infer_implicit_indexes(&mut ctx);
 
-        ctx.finish()
+        ParserDatabase {
+            ast,
+            interner,
+            _names: names,
+            types,
+            relations,
+        }
     }
 
     /// The fully resolved (non alias) scalar field type of an alias. .
@@ -124,18 +136,21 @@ impl<'ast> ParserDatabase<'ast> {
     }
 
     /// The parsed AST.
-    pub fn ast(&self) -> &'ast ast::SchemaAst {
-        self.ast
-    }
-
-    /// Find a specific field in a specific model.
-    fn find_model_field(&self, model_id: ast::ModelId, field_name: &str) -> Option<ast::FieldId> {
-        self.names.model_fields.get(&(model_id, field_name)).cloned()
+    pub fn ast(&self) -> &ast::SchemaAst {
+        &self.ast
     }
 }
 
-impl std::fmt::Debug for ParserDatabase<'_> {
+impl std::fmt::Debug for ParserDatabase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ParserDatabase { ... }")
+    }
+}
+
+impl std::ops::Index<StringId> for ParserDatabase {
+    type Output = str;
+
+    fn index(&self, index: StringId) -> &Self::Output {
+        self.interner.get(index).unwrap()
     }
 }

@@ -10,7 +10,7 @@ use introspection_connector::{
     CompositeTypeDepth, ConnectorResult, DatabaseMetadata, IntrospectionConnector, IntrospectionContext,
     IntrospectionResult, Version,
 };
-use migration_connector::MigrationConnector;
+use migration_connector::{ConnectorParams, MigrationConnector};
 use quaint::{
     prelude::{Queryable, SqlFamily},
     single::Quaint,
@@ -41,9 +41,15 @@ impl TestApi {
             .collect();
 
         let (database, connection_string): (Quaint, String) = if tags.intersects(Tags::Vitess) {
-            let me = SqlMigrationConnector::new(connection_string.to_owned(), preview_features, None).unwrap();
+            let params = ConnectorParams {
+                connection_string: connection_string.to_owned(),
+                preview_features,
+                shadow_database_connection_string: None,
+            };
+            let mut me = SqlMigrationConnector::new_mysql();
+            me.set_params(params).unwrap();
 
-            me.reset().await.unwrap();
+            me.reset(true).await.unwrap();
 
             (
                 Quaint::new(connection_string).await.unwrap(),
@@ -317,7 +323,8 @@ impl TestApi {
 
 #[track_caller]
 fn parse_datamodel(dm: &str) -> Datamodel {
-    datamodel::parse_datamodel_or_pretty_error(dm, "schema.prisma")
+    datamodel::parse_datamodel(dm)
+        .map_err(|diagnostics| diagnostics.to_pretty_string("schema.prisma", dm))
         .unwrap()
         .subject
 }

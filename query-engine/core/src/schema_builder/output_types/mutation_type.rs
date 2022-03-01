@@ -1,8 +1,6 @@
-use crate::constants::args::*;
-
 use super::*;
 use datamodel_connector::ConnectorCapability;
-use input_types::input_fields;
+use input_types::fields::{arguments, input_fields};
 use prisma_models::{dml, PrismaValue};
 
 /// Builds the root `Mutation` type.
@@ -12,7 +10,7 @@ pub(crate) fn build(ctx: &mut BuilderContext) -> (OutputType, ObjectTypeStrongRe
         .internal_data_model
         .models_cloned()
         .into_iter()
-        .map(|model| {
+        .flat_map(|model| {
             let mut vec = vec![];
 
             if model.supports_create_operation {
@@ -30,14 +28,17 @@ pub(crate) fn build(ctx: &mut BuilderContext) -> (OutputType, ObjectTypeStrongRe
 
             vec
         })
-        .flatten()
         .collect();
 
     create_nested_inputs(ctx);
 
-    if ctx.enable_raw_queries && ctx.capabilities.contains(ConnectorCapability::QueryRaw) {
+    if ctx.enable_raw_queries && ctx.capabilities.contains(ConnectorCapability::SqlQueryRaw) {
         fields.push(create_execute_raw_field());
         fields.push(create_query_raw_field());
+    }
+
+    if ctx.enable_raw_queries && ctx.capabilities.contains(ConnectorCapability::MongoDbQueryRaw) {
+        fields.push(create_mongodb_run_command_raw());
     }
 
     let ident = Identifier::new("Mutation".to_owned(), PRISMA_NAMESPACE);
@@ -102,9 +103,9 @@ fn create_execute_raw_field() -> OutputField {
     field(
         "executeRaw",
         vec![
-            input_field(QUERY, InputType::string(), None),
+            input_field("query", InputType::string(), None),
             input_field(
-                PARAMETERS,
+                "parameters",
                 InputType::json_list(),
                 Some(dml::DefaultValue::new_single(PrismaValue::String("[]".into()))),
             )
@@ -122,9 +123,9 @@ fn create_query_raw_field() -> OutputField {
     field(
         "queryRaw",
         vec![
-            input_field(QUERY, InputType::string(), None),
+            input_field("query", InputType::string(), None),
             input_field(
-                PARAMETERS,
+                "parameters",
                 InputType::json_list(),
                 Some(dml::DefaultValue::new_single(PrismaValue::String("[]".into()))),
             )
@@ -132,7 +133,21 @@ fn create_query_raw_field() -> OutputField {
         ],
         OutputType::json(),
         Some(QueryInfo {
-            tag: QueryTag::QueryRaw,
+            tag: QueryTag::QueryRaw { query_type: None },
+            model: None,
+        }),
+    )
+}
+
+fn create_mongodb_run_command_raw() -> OutputField {
+    field(
+        "runCommandRaw",
+        vec![input_field("command", InputType::json(), None)],
+        OutputType::json(),
+        Some(QueryInfo {
+            tag: QueryTag::QueryRaw {
+                query_type: Some("runCommandRaw".to_string()),
+            },
             model: None,
         }),
     )
@@ -140,13 +155,13 @@ fn create_query_raw_field() -> OutputField {
 
 /// Builds a create mutation field (e.g. createUser) for given model.
 fn create_item_field(ctx: &mut BuilderContext, model: &ModelRef) -> OutputField {
-    let args = arguments::create_one_arguments(ctx, model).unwrap_or_else(Vec::new);
+    let args = arguments::create_one_arguments(ctx, model).unwrap_or_default();
     let field_name = ctx.pluralize_internal(format!("create{}", model.name), format!("createOne{}", model.name));
 
     field(
         field_name,
         args,
-        OutputType::object(output_objects::map_model_object_type(ctx, &model)),
+        OutputType::object(objects::model::map_type(ctx, &model)),
         Some(QueryInfo {
             model: Some(Arc::clone(&model)),
             tag: QueryTag::CreateOne,
@@ -162,7 +177,7 @@ fn delete_item_field(ctx: &mut BuilderContext, model: &ModelRef) -> Option<Outpu
         field(
             field_name,
             args,
-            OutputType::object(output_objects::map_model_object_type(ctx, &model)),
+            OutputType::object(objects::model::map_type(ctx, &model)),
             Some(QueryInfo {
                 model: Some(Arc::clone(&model)),
                 tag: QueryTag::DeleteOne,
@@ -183,7 +198,7 @@ fn delete_many_field(ctx: &mut BuilderContext, model: &ModelRef) -> OutputField 
     field(
         field_name,
         arguments,
-        OutputType::object(output_objects::affected_records_object_type(ctx)),
+        OutputType::object(objects::affected_records_object_type(ctx)),
         Some(QueryInfo {
             model: Some(Arc::clone(&model)),
             tag: QueryTag::DeleteMany,
@@ -199,7 +214,7 @@ fn update_item_field(ctx: &mut BuilderContext, model: &ModelRef) -> Option<Outpu
         field(
             field_name,
             args,
-            OutputType::object(output_objects::map_model_object_type(ctx, &model)),
+            OutputType::object(objects::model::map_type(ctx, &model)),
             Some(QueryInfo {
                 model: Some(Arc::clone(&model)),
                 tag: QueryTag::UpdateOne,
@@ -218,7 +233,7 @@ fn create_many_field(ctx: &mut BuilderContext, model: &ModelRef) -> Option<Outpu
         Some(field(
             field_name,
             arguments,
-            OutputType::object(output_objects::affected_records_object_type(ctx)),
+            OutputType::object(objects::affected_records_object_type(ctx)),
             Some(QueryInfo {
                 model: Some(Arc::clone(&model)),
                 tag: QueryTag::CreateMany,
@@ -240,7 +255,7 @@ fn update_many_field(ctx: &mut BuilderContext, model: &ModelRef) -> OutputField 
     field(
         field_name,
         arguments,
-        OutputType::object(output_objects::affected_records_object_type(ctx)),
+        OutputType::object(objects::affected_records_object_type(ctx)),
         Some(QueryInfo {
             model: Some(Arc::clone(&model)),
             tag: QueryTag::UpdateMany,
@@ -256,7 +271,7 @@ fn upsert_item_field(ctx: &mut BuilderContext, model: &ModelRef) -> Option<Outpu
         field(
             field_name,
             args,
-            OutputType::object(output_objects::map_model_object_type(ctx, &model)),
+            OutputType::object(objects::model::map_type(ctx, &model)),
             Some(QueryInfo {
                 model: Some(Arc::clone(&model)),
                 tag: QueryTag::UpsertOne,

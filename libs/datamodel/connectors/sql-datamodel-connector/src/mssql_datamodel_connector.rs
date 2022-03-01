@@ -3,8 +3,8 @@ use datamodel_connector::{
     helper::{arg_vec_from_opt, args_vec_from_opt, parse_one_opt_u32, parse_two_opt_u32},
     parser_database::{self, ScalarType},
     walker_ext_traits::*,
-    Connector, ConnectorCapability, ConstraintScope, Diagnostics, NativeTypeConstructor, NativeTypeInstance,
-    ReferentialAction, ReferentialIntegrity,
+    Connector, ConnectorCapability, ConstraintScope, DatamodelError, Diagnostics, NativeTypeConstructor,
+    NativeTypeInstance, ReferentialAction, ReferentialIntegrity,
 };
 use enumflags2::BitFlags;
 use native_types::{MsSqlType, MsSqlTypeParameter, NativeType};
@@ -90,10 +90,11 @@ const CAPABILITIES: &[ConnectorCapability] = &[
     ConnectorCapability::NamedDefaultValues,
     ConnectorCapability::NamedForeignKeys,
     ConnectorCapability::NamedPrimaryKeys,
-    ConnectorCapability::QueryRaw,
+    ConnectorCapability::SqlQueryRaw,
     ConnectorCapability::ReferenceCycleDetection,
     ConnectorCapability::UpdateableId,
     ConnectorCapability::PrimaryKeySortOrderDefinition,
+    ConnectorCapability::ImplicitManyToManyRelation,
 ];
 
 pub struct MsSqlDatamodelConnector;
@@ -261,12 +262,9 @@ impl Connector for MsSqlDatamodelConnector {
         }
     }
 
-    fn validate_model(&self, model: parser_database::walkers::ModelWalker<'_, '_>, errors: &mut Diagnostics) {
+    fn validate_model(&self, model: parser_database::walkers::ModelWalker<'_>, errors: &mut Diagnostics) {
         let mut push_error = |err: ConnectorError| {
-            errors.push_error(datamodel_connector::DatamodelError::ConnectorError {
-                message: err.to_string(),
-                span: model.ast_model().span,
-            });
+            errors.push_error(DatamodelError::new_connector_error(err, model.ast_model().span));
         };
 
         for index in model.indexes() {
@@ -306,7 +304,7 @@ impl Connector for MsSqlDatamodelConnector {
                         message: String::from("Using Bytes type is not allowed in the model's id."),
                     };
 
-                    push_error(ConnectorError { kind });
+                    push_error(ConnectorError::from_kind(kind));
                     break;
                 }
             }

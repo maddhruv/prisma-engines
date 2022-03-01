@@ -228,7 +228,7 @@ impl<'a> SqlSchemaDescriber<'a> {
         indices: &mut BTreeMap<String, (Vec<Index>, Option<PrimaryKey>)>,
     ) -> Table {
         let (indices, primary_key) = indices.remove(name).unwrap_or_else(|| (Vec::new(), None));
-        let foreign_keys = foreign_keys.remove(name).unwrap_or_else(Vec::new);
+        let foreign_keys = foreign_keys.remove(name).unwrap_or_default();
         let columns = columns.remove(name).unwrap_or_default();
         Table {
             name: name.to_string(),
@@ -964,7 +964,10 @@ fn unsuffix_default_literal<'a, T: AsRef<str>>(literal: &'a str, expected_suffix
     let captures = POSTGRES_DATA_TYPE_SUFFIX_RE.captures(literal)?;
     let suffix = captures.get(3).unwrap().as_str();
 
-    if !expected_suffixes.iter().any(|expected| expected.as_ref() == suffix) {
+    if !expected_suffixes
+        .iter()
+        .any(|expected| expected.as_ref().eq_ignore_ascii_case(suffix))
+    {
         return None;
     }
 

@@ -32,8 +32,12 @@ pub async fn describe(client: &mongodb::Client, db_name: &str) -> mongodb::error
         let mut indexes_cursor = collection.list_indexes(None).await?;
 
         while let Some(index) = indexes_cursor.try_next().await? {
-            let options = index.options.unwrap();
-            let name = options.name.unwrap();
+            let options = index.options.unwrap_or_default();
+
+            let name = match options.name {
+                Some(name) => name,
+                None => continue,
+            };
 
             let r#type = match (options.unique, options.text_index_version.as_ref()) {
                 (Some(_), _) => IndexType::Unique,
@@ -98,4 +102,22 @@ pub async fn describe(client: &mongodb::Client, db_name: &str) -> mongodb::error
     }
 
     Ok(schema)
+}
+/// Get the version.
+pub async fn version(client: &mongodb::Client, db_name: &str) -> mongodb::error::Result<String> {
+    let database = client.database(db_name);
+    use mongodb::bson::doc;
+    let version_cmd = doc! {"buildInfo": 1};
+    let res = database.run_command(version_cmd, None).await?;
+    let version = res
+        .get("versionArray")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_i32().unwrap().to_string())
+        .collect::<Vec<String>>()
+        .join(".");
+
+    Ok(version)
 }

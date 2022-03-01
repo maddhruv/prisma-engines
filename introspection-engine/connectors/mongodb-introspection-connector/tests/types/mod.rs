@@ -2,6 +2,7 @@ mod composite;
 
 use crate::test_api::*;
 use mongodb::bson::{doc, oid::ObjectId, Binary, Bson, DateTime, Decimal128, Timestamp};
+use serde_json::json;
 
 #[test]
 fn string() {
@@ -22,7 +23,7 @@ fn string() {
 
     let expected = expect![[r#"
         model A {
-          id     String  @id @default(dbgenerated()) @map("_id") @db.ObjectId
+          id     String  @id @default(auto()) @map("_id") @db.ObjectId
           first  String
           second String?
           third  String?
@@ -51,7 +52,7 @@ fn double() {
 
     let expected = expect![[r#"
         model A {
-          id     String @id @default(dbgenerated()) @map("_id") @db.ObjectId
+          id     String @id @default(auto()) @map("_id") @db.ObjectId
           first  Float
           second Float?
           third  Float?
@@ -80,7 +81,7 @@ fn bool() {
 
     let expected = expect![[r#"
         model A {
-          id     String   @id @default(dbgenerated()) @map("_id") @db.ObjectId
+          id     String   @id @default(auto()) @map("_id") @db.ObjectId
           first  Boolean
           second Boolean?
           third  Boolean?
@@ -109,7 +110,7 @@ fn int() {
 
     let expected = expect![[r#"
         model A {
-          id     String @id @default(dbgenerated()) @map("_id") @db.ObjectId
+          id     String @id @default(auto()) @map("_id") @db.ObjectId
           first  Int
           second Int?
           third  Int?
@@ -138,7 +139,7 @@ fn bigint() {
 
     let expected = expect![[r#"
         model A {
-          id     String  @id @default(dbgenerated()) @map("_id") @db.ObjectId
+          id     String  @id @default(auto()) @map("_id") @db.ObjectId
           first  BigInt
           second BigInt?
           third  BigInt?
@@ -178,7 +179,7 @@ fn timestamp() {
 
     let expected = expect![[r#"
         model A {
-          id     String    @id @default(dbgenerated()) @map("_id") @db.ObjectId
+          id     String    @id @default(auto()) @map("_id") @db.ObjectId
           first  DateTime
           second DateTime?
           third  DateTime?
@@ -223,7 +224,7 @@ fn binary() {
 
     let expected = expect![[r#"
         model A {
-          id     String @id @default(dbgenerated()) @map("_id") @db.ObjectId
+          id     String @id @default(auto()) @map("_id") @db.ObjectId
           first  Bytes
           second Bytes?
           third  Bytes?
@@ -263,7 +264,7 @@ fn object_id() {
 
     let expected = expect![[r#"
         model A {
-          id     String  @id @default(dbgenerated()) @map("_id") @db.ObjectId
+          id     String  @id @default(auto()) @map("_id") @db.ObjectId
           first  String  @db.ObjectId
           second String? @db.ObjectId
           third  String? @db.ObjectId
@@ -303,7 +304,7 @@ fn date() {
 
     let expected = expect![[r#"
         model A {
-          id     String    @id @default(dbgenerated()) @map("_id") @db.ObjectId
+          id     String    @id @default(auto()) @map("_id") @db.ObjectId
           first  DateTime  @db.Date
           second DateTime? @db.Date
           third  DateTime? @db.Date
@@ -343,7 +344,7 @@ fn decimal() {
 
     let expected = expect![[r#"
         model A {
-          id     String   @id @default(dbgenerated()) @map("_id") @db.ObjectId
+          id     String   @id @default(auto()) @map("_id") @db.ObjectId
           first  Decimal
           second Decimal?
           third  Decimal?
@@ -383,10 +384,35 @@ fn array() {
 
     let expected = expect![[r#"
         model A {
-          id     String @id @default(dbgenerated()) @map("_id") @db.ObjectId
+          id     String @id @default(auto()) @map("_id") @db.ObjectId
           first  Int[]
           second Int[]
           third  Int[]
+        }
+    "#]];
+
+    expected.assert_eq(res.datamodel());
+}
+
+#[test]
+fn deep_array() {
+    let res = introspect(|db| async move {
+        db.create_collection("A", None).await?;
+        let collection = db.collection("A");
+
+        let docs = vec![doc! {
+            "first": Bson::Array(vec![Bson::Array(vec![Bson::Int32(1)])]),
+        }];
+
+        collection.insert_many(docs, None).await.unwrap();
+
+        Ok(())
+    });
+
+    let expected = expect![[r#"
+        model A {
+          id    String @id @default(auto()) @map("_id") @db.ObjectId
+          first Json
         }
     "#]];
 
@@ -409,10 +435,47 @@ fn empty_arrays() {
 
     let expected = expect![[r#"
         model A {
-          id   String                  @id @default(dbgenerated()) @map("_id") @db.ObjectId
-          data Unsupported("Unknown")?
+          id   String @id @default(auto()) @map("_id") @db.ObjectId
+          /// Could not determine type: the field only had null or empty values in the sample set.
+          data Json?
         }
     "#]];
 
     expected.assert_eq(res.datamodel());
+    res.assert_warning_code(103);
+    res.assert_warning("Could not determine the types for the following fields.");
+
+    res.assert_warning_affected(&json!([{
+        "model": "A",
+        "field": "data",
+    }]));
+}
+
+#[test]
+fn unknown_types() {
+    let res = introspect(|db| async move {
+        db.create_collection("A", None).await?;
+        let collection = db.collection("A");
+
+        collection.insert_one(doc! { "data": Bson::Null }, None).await.unwrap();
+
+        Ok(())
+    });
+
+    let expected = expect![[r#"
+        model A {
+          id   String @id @default(auto()) @map("_id") @db.ObjectId
+          /// Could not determine type: the field only had null or empty values in the sample set.
+          data Json?
+        }
+    "#]];
+
+    expected.assert_eq(res.datamodel());
+    res.assert_warning_code(103);
+    res.assert_warning("Could not determine the types for the following fields.");
+
+    res.assert_warning_affected(&json!([{
+        "model": "A",
+        "field": "data",
+    }]));
 }

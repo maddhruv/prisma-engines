@@ -70,6 +70,10 @@ impl FieldType {
         self.scalar_type().map(|st| st.is_string()).unwrap_or(false)
     }
 
+    pub fn is_composite(&self) -> bool {
+        matches!(self, Self::CompositeType(_))
+    }
+
     pub fn is_enum(&self, name: &str) -> bool {
         matches!(self, Self::Enum(this) if this == name)
     }
@@ -113,6 +117,13 @@ impl Field {
     }
 
     pub fn as_scalar_field(&self) -> Option<&ScalarField> {
+        match self {
+            Field::ScalarField(sf) => Some(sf),
+            _ => None,
+        }
+    }
+
+    pub fn as_scalar_field_mut(&mut self) -> Option<&mut ScalarField> {
         match self {
             Field::ScalarField(sf) => Some(sf),
             _ => None,
@@ -551,6 +562,9 @@ pub struct CompositeField {
 
     /// Indicates if this field has to be ignored by the Client.
     pub is_ignored: bool,
+
+    /// The default value of this field
+    pub default_value: Option<DefaultValue>,
 }
 
 impl CompositeField {
@@ -563,6 +577,7 @@ impl CompositeField {
             documentation: None,
             is_commented_out: false,
             is_ignored: false,
+            default_value: None,
         }
     }
 }
@@ -577,6 +592,7 @@ impl WithName for CompositeField {
     fn name(&self) -> &String {
         &self.name
     }
+
     fn set_name(&mut self, name: &str) {
         self.name = String::from(name)
     }

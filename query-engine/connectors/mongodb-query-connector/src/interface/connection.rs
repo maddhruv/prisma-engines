@@ -1,6 +1,5 @@
 use super::catch;
 use crate::{
-    error::MongoError,
     root_queries::{aggregate, read, write},
     MongoDbTransaction,
 };
@@ -10,6 +9,7 @@ use connector_interface::{
 };
 use mongodb::{ClientSession, Database};
 use prisma_models::{prelude::*, SelectionResult};
+use std::collections::HashMap;
 
 pub struct MongoDbConnection {
     /// The session to use for operations.
@@ -42,6 +42,7 @@ impl WriteOperations for MongoDbConnection {
         &mut self,
         model: &ModelRef,
         args: WriteArgs,
+        _trace_id: Option<String>,
     ) -> connector_interface::Result<SelectionResult> {
         catch(async move { write::create_record(&self.database, &mut self.session, model, args).await }).await
     }
@@ -51,6 +52,7 @@ impl WriteOperations for MongoDbConnection {
         model: &ModelRef,
         args: Vec<WriteArgs>,
         skip_duplicates: bool,
+        _trace_id: Option<String>,
     ) -> connector_interface::Result<usize> {
         catch(
             async move { write::create_records(&self.database, &mut self.session, model, args, skip_duplicates).await },
@@ -63,6 +65,7 @@ impl WriteOperations for MongoDbConnection {
         model: &ModelRef,
         record_filter: connector_interface::RecordFilter,
         args: WriteArgs,
+        _trace_id: Option<String>,
     ) -> connector_interface::Result<Vec<SelectionResult>> {
         catch(async move { write::update_records(&self.database, &mut self.session, model, record_filter, args).await })
             .await
@@ -72,6 +75,7 @@ impl WriteOperations for MongoDbConnection {
         &mut self,
         model: &ModelRef,
         record_filter: connector_interface::RecordFilter,
+        _trace_id: Option<String>,
     ) -> connector_interface::Result<usize> {
         catch(async move { write::delete_records(&self.database, &mut self.session, model, record_filter).await }).await
     }
@@ -91,6 +95,7 @@ impl WriteOperations for MongoDbConnection {
         field: &RelationFieldRef,
         parent_id: &SelectionResult,
         child_ids: &[SelectionResult],
+        _trace_id: Option<String>,
     ) -> connector_interface::Result<()> {
         catch(
             async move { write::m2m_disconnect(&self.database, &mut self.session, field, parent_id, child_ids).await },
@@ -98,20 +103,17 @@ impl WriteOperations for MongoDbConnection {
         .await
     }
 
-    async fn execute_raw(
-        &mut self,
-        _query: String,
-        _parameters: Vec<prisma_value::PrismaValue>,
-    ) -> connector_interface::Result<usize> {
-        Err(MongoError::Unsupported("Raw queries".to_owned()).into_connector_error())
+    async fn execute_raw(&mut self, inputs: HashMap<String, PrismaValue>) -> connector_interface::Result<usize> {
+        catch(async move { write::execute_raw(&self.database, &mut self.session, inputs).await }).await
     }
 
     async fn query_raw(
         &mut self,
-        _query: String,
-        _parameters: Vec<prisma_value::PrismaValue>,
+        model: Option<&ModelRef>,
+        inputs: HashMap<String, PrismaValue>,
+        query_type: Option<String>,
     ) -> connector_interface::Result<serde_json::Value> {
-        Err(MongoError::Unsupported("Raw queries".to_owned()).into_connector_error())
+        catch(async move { write::query_raw(&self.database, &mut self.session, model, inputs, query_type).await }).await
     }
 }
 
@@ -123,6 +125,7 @@ impl ReadOperations for MongoDbConnection {
         filter: &connector_interface::Filter,
         selected_fields: &FieldSelection,
         aggr_selections: &[RelAggregationSelection],
+        _trace_id: Option<String>,
     ) -> connector_interface::Result<Option<SingleRecord>> {
         catch(async move {
             read::get_single_record(
@@ -130,7 +133,7 @@ impl ReadOperations for MongoDbConnection {
                 &mut self.session,
                 model,
                 filter,
-                &selected_fields.into(),
+                selected_fields,
                 aggr_selections,
             )
             .await
@@ -144,6 +147,7 @@ impl ReadOperations for MongoDbConnection {
         query_arguments: connector_interface::QueryArguments,
         selected_fields: &FieldSelection,
         aggregation_selections: &[RelAggregationSelection],
+        _trace_id: Option<String>,
     ) -> connector_interface::Result<ManyRecords> {
         catch(async move {
             read::get_many_records(
@@ -151,7 +155,7 @@ impl ReadOperations for MongoDbConnection {
                 &mut self.session,
                 model,
                 query_arguments,
-                &selected_fields.into(),
+                selected_fields,
                 aggregation_selections,
             )
             .await
@@ -163,6 +167,7 @@ impl ReadOperations for MongoDbConnection {
         &mut self,
         from_field: &RelationFieldRef,
         from_record_ids: &[SelectionResult],
+        _trace_id: Option<String>,
     ) -> connector_interface::Result<Vec<(SelectionResult, SelectionResult)>> {
         catch(async move {
             read::get_related_m2m_record_ids(&self.database, &mut self.session, from_field, from_record_ids).await
@@ -177,6 +182,7 @@ impl ReadOperations for MongoDbConnection {
         selections: Vec<connector_interface::AggregationSelection>,
         group_by: Vec<ScalarFieldRef>,
         having: Option<connector_interface::Filter>,
+        _trace_id: Option<String>,
     ) -> connector_interface::Result<Vec<connector_interface::AggregationRow>> {
         catch(async move {
             aggregate::aggregate(

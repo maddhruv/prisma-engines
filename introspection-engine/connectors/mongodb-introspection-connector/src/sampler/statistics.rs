@@ -6,32 +6,33 @@ pub(crate) use name::Name;
 use super::{field_type::FieldType, CompositeTypeDepth};
 use convert_case::{Case, Casing};
 use datamodel::{
-    CompositeType, CompositeTypeField, Datamodel, DefaultValue, Field, IndexDefinition, IndexField, IndexType, Model,
-    NativeTypeInstance, PrimaryKeyDefinition, PrimaryKeyField, ScalarField, ScalarType, SortOrder, ValueGenerator,
-    WithDatabaseName,
+    CompositeType, CompositeTypeField, CompositeTypeFieldType, Datamodel, DefaultValue, Field, IndexDefinition,
+    IndexField, IndexType, Model, PrimaryKeyDefinition, PrimaryKeyField, ScalarField, ScalarType, SortOrder,
+    ValueGenerator, WithDatabaseName,
 };
 use introspection_connector::Warning;
 use mongodb::bson::{Bson, Document};
-use native_types::MongoDbType;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::{
     borrow::Cow,
     cmp::Ordering,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
 };
 
 pub(super) const SAMPLE_SIZE: i32 = 1000;
 
 static RESERVED_NAMES: &[&str] = &["PrismaClient"];
+static COMMENTED_OUT_FIELD: &str = "This field was commented out because of an invalid name. Please provide a valid one that matches [a-zA-Z][a-zA-Z0-9_]*";
+static EMPTY_TYPE_DETECTED: &str = "Nested objects had no data in the sample dataset to introspect a nested type.";
 
 /// Statistical data from a MongoDB database for determining a Prisma data
 /// model.
 #[derive(Default)]
 pub(super) struct Statistics<'a> {
-    /// (model_name, field_name) -> type percentages
-    fields: BTreeMap<(Name, String), FieldSampler>,
+    /// (container_name, field_name) -> type percentages
+    samples: BTreeMap<(Name, String), FieldSampler>,
     /// model_name -> document count
     models: HashMap<Name, usize>,
     /// model_name -> indices
@@ -68,121 +69,41 @@ impl<'a> Statistics<'a> {
     pub(super) fn into_datamodel(self, warnings: &mut Vec<Warning>) -> Datamodel {
         let mut data_model = Datamodel::new();
         let mut indices = self.indices;
-        let mut unsupported = Vec::new();
-        let mut undecided_types = Vec::new();
-
-        let mut models: BTreeMap<String, Model> = self
-            .models
-            .iter()
-            .flat_map(|(name, _)| name.as_model_name())
-            .map(|model_name| (model_name.to_string(), new_model(model_name)))
-            .collect();
-
-        let mut types: BTreeMap<String, CompositeType> = self
-            .models
-            .iter()
-            .flat_map(|(name, _)| name.as_type_name())
-            .map(|type_name| (type_name.to_string(), new_composite_type(type_name)))
-            .collect();
-
-        for ((name, field_name), sampler) in self.fields.into_iter() {
-            let doc_count = *self.models.get(&name).unwrap_or(&0);
-            let field_count = sampler.counter;
-
-            let percentages = sampler.percentages();
-
-            let field_type = match percentages.find_most_common() {
-                Some(field_type) => field_type.to_owned(),
-                None => FieldType::Unsupported("Unknown"),
-            };
-
-            if let FieldType::Unsupported(r#type) = field_type {
-                unsupported.push((name.to_string(), field_name.to_string(), r#type));
-            }
-
-            if percentages.data.len() > 1 {
-                undecided_types.push((name.to_string(), field_name.to_string(), field_type.to_string()));
-            }
-
-            let arity = if field_type.is_array() {
-                datamodel::FieldArity::List
-            } else if doc_count > field_count || sampler.nullable {
-                datamodel::FieldArity::Optional
-            } else {
-                datamodel::FieldArity::Required
-            };
-
-            let documentation = if percentages.has_type_variety() {
-                Some(format!(
-                    "Multiple data types found: {} out of {} sampled entries",
-                    percentages, field_count
-                ))
-            } else {
-                None
-            };
-
-            let (sanitized_name, database_name) = match sanitize_string(&field_name) {
-                Some(sanitized) => (sanitized, Some(field_name)),
-                None if field_name == "id" => ("id_".to_string(), Some(field_name)),
-                None => (field_name, None),
-            };
-
-            match name {
-                Name::Model(model_name) => {
-                    let model = models.get_mut(&model_name).unwrap();
-
-                    if database_name.as_deref() == Some("_id") {
-                        continue;
-                    }
-
-                    model.fields.push(Field::ScalarField(ScalarField {
-                        name: sanitized_name,
-                        field_type: field_type.into(),
-                        arity,
-                        database_name,
-                        default_value: None,
-                        documentation,
-                        is_generated: false,
-                        is_updated_at: false,
-                        is_commented_out: false,
-                        is_ignored: false,
-                    }));
-                }
-                Name::CompositeType(type_name) => {
-                    let r#type = types.get_mut(&type_name).unwrap();
-
-                    r#type.fields.push(CompositeTypeField {
-                        name: sanitized_name,
-                        r#type: field_type.into(),
-                        arity,
-                        documentation,
-                        database_name,
-                    });
-                }
-            }
-        }
+        let (mut models, types) = populate_fields(&self.models, self.samples, warnings);
 
         add_indices_to_models(&mut models, &mut indices);
+        add_missing_ids_to_models(&mut models);
 
         for (_, model) in models.into_iter() {
             data_model.add_model(model);
         }
 
-        for (_, composite_type) in types.into_iter() {
+        for (_, mut composite_type) in types.into_iter() {
+            if composite_type
+                .fields
+                .iter()
+                .any(|f| f.database_name == Some("_id".into()))
+            {
+                if let Some(field) = composite_type
+                    .fields
+                    .iter_mut()
+                    .find(|f| f.name == *"id" && f.database_name.is_none())
+                {
+                    field.name = "id_".into();
+                    field.database_name = Some("id".into());
+                }
+            }
+
             data_model.composite_types.push(composite_type);
-        }
-
-        if !unsupported.is_empty() {
-            warnings.push(crate::warnings::unsupported_type(&unsupported));
-        }
-
-        if !undecided_types.is_empty() {
-            warnings.push(crate::warnings::undecided_field_type(&undecided_types));
         }
 
         data_model
     }
 
+    /// Creates a new name for a composite type with the following rules:
+    ///
+    /// - if model is foo and field is bar, the type is FooBar
+    /// - if a model already exists with the name, we'll use FooBar_
     fn composite_type_name(&self, model: &str, field: &str) -> Name {
         let name = Name::Model(format!("{}_{}", model, field).to_case(Case::Pascal));
 
@@ -195,6 +116,7 @@ impl<'a> Statistics<'a> {
         Name::CompositeType(name)
     }
 
+    /// Tracking the usage of types and names in a composite type.
     fn track_composite_type_fields(
         &mut self,
         model: &str,
@@ -206,6 +128,10 @@ impl<'a> Statistics<'a> {
         self.track_document_types(name, document, depth);
     }
 
+    /// If a document has a nested document, we'll introspect it as a composite
+    /// type until a certain depth. The depth can be given by user, and if we
+    /// reach enough nesting the following composite types are introspected as
+    /// `Json`.
     fn find_and_track_composite_types(
         &mut self,
         model: &str,
@@ -264,26 +190,53 @@ impl<'a> Statistics<'a> {
                 None
             };
 
-            let sampler = self.fields.entry((name.clone(), field.to_string())).or_default();
+            let sampler = self.samples.entry((name.clone(), field.to_string())).or_default();
             sampler.counter += 1;
 
             match FieldType::from_bson(val, compound_name) {
-                Some(_) if found_composite && array_layers > 1 => {
-                    let counter = sampler
-                        .types
-                        .entry(FieldType::Array(Box::new(FieldType::Json)))
-                        .or_default();
+                // We cannot have arrays of arrays, so multi-dimensional arrays
+                // are introspected as `Json`.
+                Some(_) if array_layers > 1 => {
+                    let counter = sampler.types.entry(FieldType::Json).or_default();
                     *counter += 1;
                 }
+                // Counting the types.
                 Some(field_type) => {
                     let counter = sampler.types.entry(field_type).or_default();
                     *counter += 1;
                 }
+                // If the value is null, the field must be optional and we
+                // cannot detect the type.
                 None => {
                     sampler.nullable = true;
                 }
             }
         }
+    }
+}
+
+/// A document must have a id column and the name is always `_id`. If we have no
+/// data in the collection, we must assume an id field exists.
+fn add_missing_ids_to_models(models: &mut BTreeMap<String, Model>) {
+    for (_, model) in models.iter_mut() {
+        if model.fields.iter().any(|f| f.database_name() == Some("_id")) {
+            continue;
+        }
+
+        let field = ScalarField {
+            name: String::from("id"),
+            field_type: datamodel::FieldType::from(FieldType::ObjectId),
+            arity: datamodel::FieldArity::Required,
+            database_name: Some(String::from("_id")),
+            default_value: Some(DefaultValue::new_expression(ValueGenerator::new_auto())),
+            documentation: None,
+            is_generated: false,
+            is_updated_at: false,
+            is_commented_out: false,
+            is_ignored: false,
+        };
+
+        model.fields.insert(0, Field::ScalarField(field));
     }
 }
 
@@ -295,6 +248,7 @@ pub struct FieldSampler {
 }
 
 impl FieldSampler {
+    /// Counting the percentages of different types per field.
     fn percentages(&self) -> FieldPercentages {
         let total = self.types.iter().fold(0, |acc, (_, count)| acc + count);
         let mut data = BTreeMap::new();
@@ -362,23 +316,6 @@ fn new_model(model_name: &str) -> Model {
         defined_on_field: true,
     };
 
-    let field_type = datamodel::FieldType::Scalar(
-        ScalarType::String,
-        None,
-        Some(NativeTypeInstance::new("ObjectId", Vec::new(), &MongoDbType::ObjectId)),
-    );
-
-    let primary_key_field = Field::ScalarField({
-        let mut sf = ScalarField::new("id", datamodel::FieldArity::Required, field_type);
-
-        sf.set_database_name(Some("_id".to_string()));
-        sf.set_default_value(DefaultValue::new_expression(
-            ValueGenerator::new("dbgenerated".to_owned(), Vec::new()).unwrap(),
-        ));
-
-        sf
-    });
-
     let (name, database_name, documentation) = match sanitize_string(model_name) {
         Some(sanitized) => (Cow::from(sanitized), Some(model_name.to_string()), None),
         None if RESERVED_NAMES.contains(&model_name) => {
@@ -396,10 +333,237 @@ fn new_model(model_name: &str) -> Model {
     Model {
         name: name.to_string(),
         primary_key: Some(primary_key),
-        fields: vec![primary_key_field],
+        fields: vec![],
         database_name,
         documentation,
         ..Default::default()
+    }
+}
+
+/// Read all samples from the data, returning models and composite types.
+///
+/// ## Input
+///
+/// - Samples, counting how many documents altogether there was in the model or
+///   in how many documents we had data for the composite type.
+/// - Fields counts from model or type and field name combination to statistics
+///   of different types seen in the data.
+fn populate_fields(
+    samples: &HashMap<Name, usize>,
+    fields: BTreeMap<(Name, String), FieldSampler>,
+    warnings: &mut Vec<Warning>,
+) -> (BTreeMap<String, Model>, BTreeMap<String, CompositeType>) {
+    let mut models: BTreeMap<String, Model> = samples
+        .iter()
+        .flat_map(|(name, _)| name.as_model_name())
+        .map(|model_name| (model_name.to_string(), new_model(model_name)))
+        .collect();
+
+    let mut types: BTreeMap<String, CompositeType> = samples
+        .iter()
+        .flat_map(|(name, _)| name.as_type_name())
+        .map(|type_name| (type_name.to_string(), new_composite_type(type_name)))
+        .collect();
+
+    let mut unsupported = Vec::new();
+    let mut unknown_types = Vec::new();
+    let mut undecided_types = Vec::new();
+    let mut fields_with_empty_names = Vec::new();
+
+    for ((container, field_name), sampler) in fields.into_iter() {
+        let doc_count = *samples.get(&container).unwrap_or(&0);
+        let field_count = sampler.counter;
+
+        let percentages = sampler.percentages();
+        let most_common_type = percentages.find_most_common();
+
+        let field_type = match &most_common_type {
+            Some(field_type) => field_type.to_owned(),
+            None => FieldType::Json,
+        };
+
+        if let FieldType::Unsupported(r#type) = field_type {
+            unsupported.push((container.clone(), field_name.to_string(), r#type));
+        }
+
+        if percentages.data.len() > 1 {
+            undecided_types.push((container.clone(), field_name.to_string(), field_type.to_string()));
+        }
+
+        let arity = if field_type.is_array() {
+            datamodel::FieldArity::List
+        } else if doc_count > field_count || sampler.nullable {
+            datamodel::FieldArity::Optional
+        } else {
+            datamodel::FieldArity::Required
+        };
+
+        let mut documentation = if percentages.has_type_variety() {
+            Some(format!(
+                "Multiple data types found: {} out of {} sampled entries",
+                percentages, field_count
+            ))
+        } else {
+            None
+        };
+
+        if most_common_type.is_none() {
+            static UNKNOWN_FIELD: &str =
+                "Could not determine type: the field only had null or empty values in the sample set.";
+
+            match &mut documentation {
+                Some(docs) => {
+                    docs.push('\n');
+                    docs.push_str(UNKNOWN_FIELD);
+                }
+                None => {
+                    documentation = Some(UNKNOWN_FIELD.to_owned());
+                }
+            }
+
+            unknown_types.push((container.clone(), field_name.to_string()));
+        }
+
+        let (name, database_name, is_commented_out) = match sanitize_string(&field_name) {
+            Some(sanitized) if sanitized.is_empty() => {
+                match documentation.as_mut() {
+                    Some(ref mut existing) => {
+                        existing.push('\n');
+                        existing.push_str(COMMENTED_OUT_FIELD);
+                    }
+                    None => {
+                        documentation = Some(COMMENTED_OUT_FIELD.to_string());
+                    }
+                };
+
+                fields_with_empty_names.push((container.clone(), field_name.clone()));
+
+                (field_name.clone(), Some(field_name), true)
+            }
+            Some(sanitized) => (sanitized, Some(field_name), false),
+            None if matches!(container, Name::Model(_)) && field_name == "id" => {
+                ("id_".to_string(), Some(field_name), false)
+            }
+            None => (field_name, None, false),
+        };
+
+        match container {
+            Name::Model(model_name) => {
+                let model = models.get_mut(&model_name).unwrap();
+
+                let mut field = ScalarField {
+                    name,
+                    field_type: datamodel::FieldType::from(field_type.clone()),
+                    arity,
+                    database_name,
+                    default_value: None,
+                    documentation,
+                    is_generated: false,
+                    is_updated_at: false,
+                    is_commented_out,
+                    is_ignored: false,
+                };
+
+                match &field.database_name {
+                    Some(name) if name == "_id" => {
+                        if let FieldType::ObjectId = &field_type {
+                            field.set_default_value(DefaultValue::new_expression(ValueGenerator::new_auto()));
+                        };
+
+                        model.fields.insert(0, Field::ScalarField(field));
+                    }
+                    _ => model.fields.push(Field::ScalarField(field)),
+                };
+            }
+            Name::CompositeType(type_name) => {
+                let r#type = types.get_mut(&type_name).unwrap();
+
+                r#type.fields.push(CompositeTypeField {
+                    name,
+                    r#type: field_type.into(),
+                    default_value: None,
+                    arity,
+                    documentation,
+                    database_name,
+                    is_commented_out,
+                });
+            }
+        }
+    }
+
+    if !unsupported.is_empty() {
+        warnings.push(crate::warnings::unsupported_type(&unsupported));
+    }
+
+    if !undecided_types.is_empty() {
+        warnings.push(crate::warnings::undecided_field_type(&undecided_types));
+    }
+
+    if !fields_with_empty_names.is_empty() {
+        warnings.push(crate::warnings::fields_with_empty_names(&fields_with_empty_names));
+    }
+
+    if !unknown_types.is_empty() {
+        warnings.push(crate::warnings::fields_with_unknown_types(&unknown_types));
+    }
+
+    filter_out_empty_types(&mut models, &mut types, warnings);
+
+    (models, types)
+}
+
+/// From the resulting data model, remove all types with no fields and change
+/// the field types to Json.
+fn filter_out_empty_types(
+    models: &mut BTreeMap<String, Model>,
+    types: &mut BTreeMap<String, CompositeType>,
+    warnings: &mut Vec<Warning>,
+) {
+    let mut fields_with_an_empty_type = Vec::new();
+
+    // 1. remove all types that have no fields.
+    let empty_types: HashSet<_> = types
+        .iter()
+        .filter(|(_, r#type)| r#type.fields.is_empty())
+        .map(|(name, _)| name.to_owned())
+        .collect();
+
+    // https://github.com/rust-lang/rust/issues/70530
+    types.retain(|_, r#type| !r#type.fields.is_empty());
+
+    // 2. change all fields in models that point to a non-existing type to Json.
+    for (model_name, model) in models.iter_mut() {
+        for field in model.fields.iter_mut().filter_map(|f| f.as_scalar_field_mut()) {
+            match &field.field_type {
+                datamodel::FieldType::CompositeType(ct) if empty_types.contains(ct) => {
+                    fields_with_an_empty_type.push((Name::Model(model_name.clone()), field.name.clone()));
+                    field.field_type = datamodel::FieldType::Scalar(datamodel::ScalarType::Json, None, None);
+                    field.documentation = Some(EMPTY_TYPE_DETECTED.to_owned());
+                }
+                _ => (),
+            }
+        }
+    }
+
+    // 3. change all fields in types that point to a non-existing type to Json.
+    for (type_name, r#type) in types.iter_mut() {
+        for field in r#type.fields.iter_mut() {
+            match &field.r#type {
+                CompositeTypeFieldType::CompositeType(name) if empty_types.contains(name) => {
+                    fields_with_an_empty_type.push((Name::CompositeType(type_name.clone()), field.name.clone()));
+                    field.r#type = CompositeTypeFieldType::Scalar(ScalarType::Json, None, None);
+                    field.documentation = Some(EMPTY_TYPE_DETECTED.to_owned());
+                }
+                _ => (),
+            }
+        }
+    }
+
+    // 4. add warnings in the end to reduce spam
+    if !fields_with_an_empty_type.is_empty() {
+        warnings.push(crate::warnings::fields_pointing_to_an_empty_type(
+            &fields_with_an_empty_type,
+        ));
     }
 }
 

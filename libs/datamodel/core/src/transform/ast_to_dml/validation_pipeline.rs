@@ -6,8 +6,8 @@ use datamodel_connector::{Connector, EmptyDatamodelConnector, ReferentialIntegri
 use enumflags2::BitFlags;
 use parser_database::ParserDatabase;
 
-pub(crate) struct ValidateOutput<'ast> {
-    pub(crate) db: ParserDatabase<'ast>,
+pub struct ValidateOutput {
+    pub(crate) db: ParserDatabase,
     pub(crate) diagnostics: Diagnostics,
     pub(crate) referential_integrity: ReferentialIntegrity,
     pub(crate) connector: &'static dyn Connector,
@@ -22,19 +22,18 @@ pub(crate) struct ValidateOutput<'ast> {
 /// * Resolve and check all field types
 /// * ...
 /// * Validate the schema
-pub(crate) fn validate<'ast>(
-    ast_schema: &'ast ast::SchemaAst,
+pub(crate) fn validate(
+    ast_schema: ast::SchemaAst,
     sources: &[configuration::Datasource],
     preview_features: BitFlags<PreviewFeature>,
-    diagnostics: Diagnostics,
-    relation_transformation_enabled: bool,
-) -> ValidateOutput<'ast> {
+    mut diagnostics: Diagnostics,
+) -> ValidateOutput {
     let source = sources.first();
     let connector = source.map(|s| s.active_connector).unwrap_or(&EmptyDatamodelConnector);
     let referential_integrity = source.map(|s| s.referential_integrity()).unwrap_or_default();
 
     // Make sense of the AST.
-    let (db, diagnostics) = ParserDatabase::new(ast_schema, diagnostics);
+    let db = ParserDatabase::new(ast_schema, &mut diagnostics);
 
     let mut output = ValidateOutput {
         db,
@@ -57,7 +56,7 @@ pub(crate) fn validate<'ast>(
         diagnostics: &mut output.diagnostics,
     };
 
-    validations::validate(&mut context, relation_transformation_enabled);
+    validations::validate(&mut context);
 
     output
 }

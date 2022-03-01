@@ -5,12 +5,15 @@ edition = "2021"
 
 [dependencies]
 datamodel = { path = "../../libs/datamodel/core" }
-migration-core = { path = "../core", features = ["sql"] }
+mongodb-client = { path = "../../libs/mongodb-client" }
+migration-core = { path = "../core" }
 
-enumflags2 = "*"
-mongodb = { git = "https://github.com/mongodb/mongo-rust-driver.git", rev = "8e55cb2" }
-url = "2"
+async-trait = "0.1.52"
 connection-string = "*"
+enumflags2 = "*"
+mongodb = "2.1.0"
+tempfile = "3.3.0"
+url = "2"
 
 [dependencies.quaint]
 git = "https://github.com/prisma/quaint"
